@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:integration": "node scripts/integration-smoke.mjs",
-    "test:integration:rate-fallback": "set BROKE_ROUTER_EXPECT_RATE_FALLBACK=1&& node scripts/integration-smoke.mjs",
+    "test:integration:rate-fallback": "node scripts/integration-rate-fallback.mjs",
     "test:watch": "vitest"
   },
   "devDependencies": {
