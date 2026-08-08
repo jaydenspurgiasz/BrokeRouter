@@ -53,7 +53,40 @@ const response = await env.LLM_GATEWAY.fetch("https://broke-router/v1/chat/compl
 
 ### Admission behavior
 
-The gateway filters capable candidates first, then tries every eligible provider credential that can admit the request **now**. A provider that is in cooldown, above its request/token window, or at its concurrent-call cap is skipped. With only NVIDIA configured today, the gateway can wait only when the next slot opens within `MAX_INLINE_WAIT_MS`; otherwise it returns a `503` and `Retry-After`. This keeps interactive agent turns bounded. Durable queued work is intentionally a future asynchronous job adapter, rather than an HTTP request held open for minutes.
+The gateway uses persisted token buckets to calculate the earliest admission slot for configured request and token rates. For example, at one request per five seconds it can report a slot about two seconds away rather than waiting for a coarse window reset. It filters capable candidates first, then tries every eligible provider credential that can admit the request **now**. A provider that is in cooldown, above its request/token bucket, or at its concurrent-call cap is skipped. When none can admit, the gateway holds a bounded inline wait (the interactive queue) only when the earliest slot is within `MAX_INLINE_WAIT_MS`; otherwise it returns a `503` and `Retry-After`. This keeps interactive agent turns bounded rather than holding an HTTP connection for minutes.
+
+## Additional providers
+
+The NVIDIA adapter is built in. Add any provider with an OpenAI-compatible Chat Completions endpoint through `ADDITIONAL_OPENAI_COMPATIBLE_PROVIDERS_JSON`; its API key remains a Worker secret named by `apiKeyBinding`.
+
+```json
+[
+  {
+    "id": "groq",
+    "endpoint": "https://api.groq.com/openai/v1/chat/completions",
+    "apiKeyBinding": "GROQ_API_KEY",
+    "credentialScope": "primary",
+    "rateLimits": {
+      "requests": { "limit": 30, "windowMs": 60000 },
+      "tokens": { "limit": 6000, "windowMs": 60000 },
+      "maxConcurrent": 2
+    },
+    "models": [
+      {
+        "id": "free/default",
+        "upstreamModel": "your-provider-model-id",
+        "contextWindow": 32000,
+        "maxOutputTokens": 4096,
+        "supports": { "streaming": true, "tools": true, "structuredOutput": false, "vision": false },
+        "tier": "fast",
+        "free": true
+      }
+    ]
+  }
+]
+```
+
+Declare `GROQ_API_KEY` as a secret, not in this JSON. Multiple configured providers share the request's routing candidate list but never share quota state: each `id` + `credentialScope` has its own coordinator. Replace the example model and limits with the provider's actual published capabilities and allowances.
 
 ## Current model aliases
 

@@ -58,9 +58,9 @@ export class QuotaCoordinator extends DurableObject<Env> {
       return denied("safety_budget", msUntilNextUtcDay(now));
     }
 
-    const requestDecision = this.checkWindow("requests", 1, settings.requests, now);
+    const requestDecision = this.checkBucket("requests", 1, settings.requests, now);
     if (requestDecision) return requestDecision;
-    const tokenDecision = this.checkWindow("tokens", tokens, settings.tokens, now);
+    const tokenDecision = this.checkBucket("tokens", tokens, settings.tokens, now);
     if (tokenDecision) return tokenDecision;
 
     const inFlight = this.reservationCount();
@@ -70,8 +70,8 @@ export class QuotaCoordinator extends DurableObject<Env> {
 
     const id = crypto.randomUUID();
     this.ctx.storage.sql.exec("INSERT INTO reservations (id, tokens, created_at) VALUES (?, ?, ?)", id, tokens, now);
-    this.incrementWindow("requests", 1, settings.requests, now);
-    this.incrementWindow("tokens", tokens, settings.tokens, now);
+    this.spendBucket("requests", 1, settings.requests, now);
+    this.spendBucket("tokens", tokens, settings.tokens, now);
     return { allowed: true, reservationId: id };
   }
 
@@ -98,28 +98,46 @@ export class QuotaCoordinator extends DurableObject<Env> {
     }
   }
 
-  private checkWindow(
+  /**
+   * A persisted token bucket predicts the earliest safe next slot rather than only detecting
+   * an already-exhausted fixed window. Values are stored in thousandths to avoid floating point
+   * drift while still allowing sub-request refill progress.
+   */
+  private checkBucket(
     name: "requests" | "tokens",
     amount: number,
     limit: ProviderRateLimitSettings["requests"],
     now: number,
   ): ReservationResult | undefined {
     if (!limit || limit.limit <= 0 || limit.windowMs <= 0) return undefined;
-    const windowStart = Math.floor(now / limit.windowMs) * limit.windowMs;
-    const key = `${name}_${windowStart}`;
-    if (this.read(key) + amount <= limit.limit) return undefined;
-    return denied(name === "requests" ? "request_rate_limit" : "token_rate_limit", windowStart + limit.windowMs - now);
+    const available = this.refilledBucket(name, limit, now);
+    const required = amount * 1_000;
+    if (available >= required) return undefined;
+    const missing = required - available;
+    const refillPerMs = (limit.limit * 1_000) / limit.windowMs;
+    return denied(name === "requests" ? "request_rate_limit" : "token_rate_limit", Math.ceil(missing / refillPerMs));
   }
 
-  private incrementWindow(
+  private spendBucket(
     name: "requests" | "tokens",
     amount: number,
     limit: ProviderRateLimitSettings["requests"],
     now: number,
   ): void {
     if (!limit || limit.limit <= 0 || limit.windowMs <= 0) return;
-    const key = `${name}_${Math.floor(now / limit.windowMs) * limit.windowMs}`;
-    this.write(key, this.read(key) + amount);
+    const available = this.refilledBucket(name, limit, now);
+    this.write(`${name}_available`, Math.max(0, available - amount * 1_000));
+    this.write(`${name}_refilled_at`, now);
+  }
+
+  private refilledBucket(name: "requests" | "tokens", limit: NonNullable<ProviderRateLimitSettings["requests"]>, now: number): number {
+    const capacity = limit.limit * 1_000;
+    const availableKey = `${name}_available`;
+    const refilledAtKey = `${name}_refilled_at`;
+    const priorAvailable = this.readOptional(availableKey) ?? capacity;
+    const refilledAt = this.readOptional(refilledAtKey) ?? now;
+    const elapsed = Math.max(0, now - refilledAt);
+    return Math.min(capacity, priorAvailable + Math.floor((elapsed * capacity) / limit.windowMs));
   }
 
   private releaseExpiredReservations(now: number, ttlMs: number): void {
@@ -141,8 +159,12 @@ export class QuotaCoordinator extends DurableObject<Env> {
   }
 
   private read(key: string): number {
+    return this.readOptional(key) ?? 0;
+  }
+
+  private readOptional(key: string): number | undefined {
     const row = [...this.ctx.storage.sql.exec<{ value: number }>("SELECT value FROM quota_state WHERE key = ?", key)][0];
-    return row?.value ?? 0;
+    return row?.value;
   }
 
   private write(key: string, value: number): void {

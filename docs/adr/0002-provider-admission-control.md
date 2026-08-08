@@ -8,7 +8,7 @@ Free provider limits are multidimensional. A request may be blocked by a request
 
 ## Decision
 
-The provider credential is the atom of coordination. Each provider credential receives one SQLite-backed Durable Object. Before any upstream call, the gateway atomically reserves the request's estimated input plus its maximum requested output. The coordinator enforces configured fixed request windows, configured fixed token windows, concurrent reservation count, daily safety budget, and cooldown/reset time. Reservation expiry recovers from a failed invocation conservatively.
+The provider credential is the atom of coordination. Each provider credential receives one SQLite-backed Durable Object. Before any upstream call, the gateway atomically reserves the request's estimated input plus its maximum requested output. The coordinator enforces configured request and token buckets, concurrent reservation count, daily safety budget, and cooldown/reset time. Token buckets persist fractional refill progress, allowing the router to predict the next safe slot rather than only react after a fixed-window boundary. Reservation expiry recovers from a failed invocation conservatively.
 
 The routing sequence is capability filter, immediate provider admission, then bounded inline waiting. A capable provider with an unavailable admission slot is not a route failure: the policy proceeds to another provider candidate. Only when no candidate can admit does the gateway wait up to `MAX_INLINE_WAIT_MS`; after that it sends a structured `503` with the earliest retry time. Long-lived queuing belongs to a future asynchronous job adapter because it should not hold an agent's interactive HTTP turn open.
 

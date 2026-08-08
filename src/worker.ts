@@ -2,6 +2,7 @@ import { RouterError, type GenerationRequest, type ProviderRateLimitSettings, ty
 import { NVIDIA_MODELS } from "./core/models";
 import { selectRoutes } from "./core/route";
 import { invokeNvidia } from "./providers/nvidia";
+import { configuredOpenAiCompatibleProviders, type RegisteredProvider } from "./providers/openai-compatible";
 import { QuotaCoordinator } from "./adapters/cloudflare/quota-coordinator";
 
 export { QuotaCoordinator };
@@ -18,6 +19,7 @@ export interface Env {
   NVIDIA_MAX_CONCURRENT?: string;
   NVIDIA_RESERVATION_TTL_MS?: string;
   MAX_INLINE_WAIT_MS?: string;
+  ADDITIONAL_OPENAI_COMPATIBLE_PROVIDERS_JSON?: string;
   QUOTA_COORDINATOR: DurableObjectNamespace<QuotaCoordinator>;
 }
 
@@ -33,12 +35,13 @@ export default {
 
       authorize(request, env);
       const generation = await parseGenerationRequest(request);
-      const admission = await admitEligibleRoute(selectRoutes(generation), env);
-      const { selection, coordinator, reservation, settings } = admission;
+      const providers = registeredProviders(env);
+      const admission = await admitEligibleRoute(selectRoutes(generation, providers.flatMap((provider) => provider.models)), providers, env);
+      const { selection, provider, coordinator, reservation, settings } = admission;
 
       let upstream: Response;
       try {
-        upstream = await invokeNvidia(generation, selection.model, env.NVIDIA_API_KEY);
+        upstream = await provider.invoke(generation, selection.model);
       } catch {
         ctx.waitUntil(coordinator.recordOutcome(reservation.reservationId!, { success: false, cooldown: true, settings }));
         throw new RouterError("upstream_error", "NVIDIA could not be reached.", 502);
@@ -52,13 +55,13 @@ export default {
           observation: { status: upstream.status, retryAfterMs },
           settings,
         }));
-        return passthrough(upstream, selection.model.id, "upstream_error");
+        return passthrough(upstream, provider.id, selection.model.id, "upstream_error");
       }
 
       ctx.waitUntil(coordinator.recordOutcome(reservation.reservationId!, { success: true, settings }));
       return generation.stream
-        ? passthrough(upstream, selection.model.id, "selected")
-        : await sanitizeCompletion(upstream, selection.model.id);
+        ? passthrough(upstream, provider.id, selection.model.id, "selected")
+        : await sanitizeCompletion(upstream, provider.id, selection.model.id);
     } catch (error) {
       if (error instanceof RouterError) return openAiError(error.code, error.message, error.status, error.retryAfterMs);
       console.error("Unhandled router error", error);
@@ -93,23 +96,23 @@ function quotaSettings(env: Env): ProviderRateLimitSettings {
   };
 }
 
-async function admitEligibleRoute(selections: RouteSelection[], env: Env): Promise<{
+async function admitEligibleRoute(selections: RouteSelection[], providers: RegisteredProvider[], env: Env): Promise<{
   selection: RouteSelection;
+  provider: RegisteredProvider;
   coordinator: DurableObjectStub<QuotaCoordinator>;
   reservation: Awaited<ReturnType<QuotaCoordinator["reserve"]>> & { allowed: true; reservationId: string };
   settings: ProviderRateLimitSettings;
 }> {
-  const settings = quotaSettings(env);
   const deferred: number[] = [];
 
   for (const selection of selections) {
-    // Provider executors will be registered here as providers are added. Unknown profiles never
-    // receive a request just because they exist in a catalog.
-    if (selection.model.provider !== "nvidia") continue;
-    const coordinator = env.QUOTA_COORDINATOR.getByName(`${selection.model.provider}:default`);
+    const provider = providers.find((item) => item.id === selection.model.provider);
+    if (!provider) continue;
+    const settings = provider.rateLimits;
+    const coordinator = env.QUOTA_COORDINATOR.getByName(`${provider.id}:${provider.credentialScope}`);
     const reservation = await coordinator.reserve(selection.reservedTokens, settings);
     if (reservation.allowed && reservation.reservationId) {
-      return { selection, coordinator, reservation: reservation as typeof reservation & { allowed: true; reservationId: string }, settings };
+      return { selection, provider, coordinator, reservation: reservation as typeof reservation & { allowed: true; reservationId: string }, settings };
     }
     if (reservation.retryAfterMs) deferred.push(reservation.retryAfterMs);
   }
@@ -119,7 +122,7 @@ async function admitEligibleRoute(selections: RouteSelection[], env: Env): Promi
   if (Number.isFinite(retryAfterMs) && retryAfterMs > 0 && retryAfterMs <= inlineWait) {
     await sleep(retryAfterMs);
     // One retry only: interactive HTTP remains bounded, while a future job adapter owns durable queues.
-    return admitEligibleRouteWithoutWait(selections, env, settings);
+    return admitEligibleRouteWithoutWait(selections, providers, env);
   }
 
   throw new RouterError(
@@ -131,20 +134,23 @@ async function admitEligibleRoute(selections: RouteSelection[], env: Env): Promi
 }
 
 async function admitEligibleRouteWithoutWait(
-  selections: RouteSelection[], env: Env, settings: ProviderRateLimitSettings,
+  selections: RouteSelection[], providers: RegisteredProvider[], env: Env,
 ): Promise<{
   selection: RouteSelection;
+  provider: RegisteredProvider;
   coordinator: DurableObjectStub<QuotaCoordinator>;
   reservation: Awaited<ReturnType<QuotaCoordinator["reserve"]>> & { allowed: true; reservationId: string };
   settings: ProviderRateLimitSettings;
 }> {
   const deferred: number[] = [];
   for (const selection of selections) {
-    if (selection.model.provider !== "nvidia") continue;
-    const coordinator = env.QUOTA_COORDINATOR.getByName(`${selection.model.provider}:default`);
+    const provider = providers.find((item) => item.id === selection.model.provider);
+    if (!provider) continue;
+    const settings = provider.rateLimits;
+    const coordinator = env.QUOTA_COORDINATOR.getByName(`${provider.id}:${provider.credentialScope}`);
     const reservation = await coordinator.reserve(selection.reservedTokens, settings);
     if (reservation.allowed && reservation.reservationId) {
-      return { selection, coordinator, reservation: reservation as typeof reservation & { allowed: true; reservationId: string }, settings };
+      return { selection, provider, coordinator, reservation: reservation as typeof reservation & { allowed: true; reservationId: string }, settings };
     }
     if (reservation.retryAfterMs) deferred.push(reservation.retryAfterMs);
   }
@@ -194,14 +200,14 @@ function parseRetryDelay(value: string | null): number | undefined {
   return Number.isFinite(date) && date > Date.now() ? date - Date.now() : undefined;
 }
 
-function passthrough(upstream: Response, model: string, reason: string): Response {
-  const headers = routedHeaders(upstream.headers, model, reason);
+function passthrough(upstream: Response, provider: string, model: string, reason: string): Response {
+  const headers = routedHeaders(upstream.headers, provider, model, reason);
   return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers });
 }
 
 /** Removes provider-specific chain-of-thought fields from non-streaming OpenAI-shaped results. */
-async function sanitizeCompletion(upstream: Response, model: string): Promise<Response> {
-  const headers = routedHeaders(upstream.headers, model, "selected");
+async function sanitizeCompletion(upstream: Response, provider: string, model: string): Promise<Response> {
+  const headers = routedHeaders(upstream.headers, provider, model, "selected");
   try {
     const payload = await upstream.clone().json<Record<string, unknown>>();
     const choices = payload.choices;
@@ -220,16 +226,33 @@ async function sanitizeCompletion(upstream: Response, model: string): Promise<Re
     headers.delete("content-encoding");
     return new Response(JSON.stringify(payload), { status: upstream.status, statusText: upstream.statusText, headers });
   } catch {
-    return passthrough(upstream, model, "selected");
+    return passthrough(upstream, provider, model, "selected");
   }
 }
 
-function routedHeaders(source: Headers, model: string, reason: string): Headers {
+function routedHeaders(source: Headers, provider: string, model: string, reason: string): Headers {
   const headers = new Headers(source);
-  headers.set("x-broke-router-provider", "nvidia");
+  headers.set("x-broke-router-provider", provider);
   headers.set("x-broke-router-model", model);
   headers.set("x-broke-router-route", reason);
   return headers;
+}
+
+function registeredProviders(env: Env): RegisteredProvider[] {
+  const nvidiaLimits = quotaSettings(env);
+  const nvidia: RegisteredProvider = {
+    id: "nvidia",
+    credentialScope: "default",
+    models: NVIDIA_MODELS,
+    rateLimits: nvidiaLimits,
+    invoke: (request, model) => invokeNvidia(request, model, env.NVIDIA_API_KEY),
+  };
+  const extras = configuredOpenAiCompatibleProviders(
+    env.ADDITIONAL_OPENAI_COMPATIBLE_PROVIDERS_JSON,
+    env as unknown as Record<string, unknown>,
+    nvidiaLimits,
+  );
+  return [nvidia, ...extras];
 }
 
 function openAiError(code: string, message: string, status: number, retryAfterMs?: number): Response {
