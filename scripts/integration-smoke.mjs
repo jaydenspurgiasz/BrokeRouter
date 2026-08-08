@@ -4,6 +4,7 @@ const baseUrl = process.env.BROKE_ROUTER_URL ?? "http://localhost:8787";
 const apiKey = process.env.BROKE_ROUTER_API_KEY ?? "local-test-key";
 const headers = { authorization: `Bearer ${apiKey}`, "content-type": "application/json" };
 const failures = [];
+const rateFallbackMode = process.env.BROKE_ROUTER_EXPECT_RATE_FALLBACK === "1";
 
 async function check(name, run) {
   try {
@@ -38,6 +39,18 @@ await check("active provider catalog", async () => {
   assert.ok(models.some((model) => model.provider === "nvidia"), "NVIDIA missing from /v1/models");
   assert.ok(models.some((model) => model.provider === "gemini"), "Gemini missing: check .dev.vars and restart dev server");
 });
+
+if (rateFallbackMode) {
+  await check("automatic NVIDIA rate-limit fallback to Gemini", async () => {
+    const request = {
+      model: "free/default", messages: [{ role: "user", content: "Reply with exactly OK." }], max_tokens: 80,
+    };
+    const first = await call("/v1/chat/completions", request);
+    assert.equal(first.response.headers.get("x-broke-router-provider"), "nvidia", "First free/default call must use NVIDIA");
+    const second = await call("/v1/chat/completions", request);
+    assert.equal(second.response.headers.get("x-broke-router-provider"), "gemini", "Second free/default call must automatically fall back to Gemini");
+  });
+} else {
 
 await check("forced NVIDIA route", async () => {
   const { response, json } = await call("/v1/chat/completions", {
@@ -96,6 +109,7 @@ await check("durable async job", async () => {
   }
   throw new Error("Job did not complete within 45 seconds");
 });
+}
 
 if (failures.length) {
   console.error(`\n${failures.length} integration check(s) failed.`);

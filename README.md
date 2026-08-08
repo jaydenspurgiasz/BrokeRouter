@@ -121,6 +121,16 @@ npm run test:integration
 
 The test invokes the live local gateway and asserts health, provider catalog, forced NVIDIA and Gemini routes, streaming, reasoning-trace sanitization, and the async-job lifecycle. It spends a small amount of free-tier quota. Override `BROKE_ROUTER_URL` or `BROKE_ROUTER_API_KEY` when needed.
 
+To test the router's actual automatic fallback logic—not a forced provider—temporarily set the following in `.dev.vars`, restart the local Worker, then run `npm run test:integration:rate-fallback`:
+
+```text
+NVIDIA_REQUESTS_PER_WINDOW=1
+NVIDIA_REQUEST_WINDOW_MS=60000
+MAX_INLINE_WAIT_MS=0
+```
+
+That test issues two ordinary `free/default` requests. It asserts the first is routed to NVIDIA and the second is automatically routed to Gemini because NVIDIA's request bucket is full. Remove those temporary limits and restart afterward.
+
 ## Current model aliases
 
 - `free/default` — text-oriented NVIDIA default.
