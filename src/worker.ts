@@ -21,6 +21,7 @@ export interface Env {
   NVIDIA_RESERVATION_TTL_MS?: string;
   MAX_INLINE_WAIT_MS?: string;
   ASYNC_JOB_MAX_ATTEMPTS?: string;
+  ASYNC_JOB_RETENTION_MS?: string;
   ADDITIONAL_OPENAI_COMPATIBLE_PROVIDERS_JSON?: string;
   QUOTA_COORDINATOR: DurableObjectNamespace<QuotaCoordinator>;
   ASYNC_JOB_QUEUE: DurableObjectNamespace<AsyncJobQueue>;

@@ -21,7 +21,7 @@ POST /v1/jobs                 → { "id": "…", "status": "queued", "status_url
 GET  /v1/jobs/{id}            → queued | running | completed | failed
 ```
 
-Jobs are deliberately non-streaming and currently execute through the NVIDIA adapter. They retry temporary upstream failures up to `ASYNC_JOB_MAX_ATTEMPTS` (default `5`), preserve only the request/result needed for completion, and remove reasoning traces from completed results. Use synchronous chat completions for interactive agent turns.
+Jobs are deliberately non-streaming and currently execute through the NVIDIA adapter. They retry temporary upstream failures up to `ASYNC_JOB_MAX_ATTEMPTS` (default `5`), preserve only the request/result needed for completion, remove reasoning traces from completed results, and purge completed/failed jobs after `ASYNC_JOB_RETENTION_MS` (24 hours by default). Use synchronous chat completions for interactive agent turns.
 
 ## Provider options
 

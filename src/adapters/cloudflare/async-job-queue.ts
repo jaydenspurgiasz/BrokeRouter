@@ -30,6 +30,7 @@ export class AsyncJobQueue extends DurableObject<Env> {
 
   async enqueue(request: GenerationRequest): Promise<AsyncJob> {
     if (request.stream) throw new Error("Async jobs do not support streaming");
+    this.purgeExpired();
     const now = Date.now();
     const id = crypto.randomUUID();
     this.ctx.storage.sql.exec(
@@ -53,11 +54,13 @@ export class AsyncJobQueue extends DurableObject<Env> {
   }
 
   async getJob(id: string): Promise<AsyncJob | null> {
+    this.purgeExpired();
     const row = [...this.ctx.storage.sql.exec<JobRow>("SELECT * FROM jobs WHERE id = ?", id)][0];
     return row ? publicJob(row) : null;
   }
 
   async alarm(): Promise<void> {
+    this.purgeExpired();
     const now = Date.now();
     const job = [...this.ctx.storage.sql.exec<JobRow>(
       "SELECT * FROM jobs WHERE status = 'queued' AND next_attempt_at <= ? ORDER BY next_attempt_at ASC LIMIT 1", now,
@@ -110,6 +113,13 @@ export class AsyncJobQueue extends DurableObject<Env> {
     const row = [...this.ctx.storage.sql.exec<{ next_attempt_at: number }>("SELECT MIN(next_attempt_at) AS next_attempt_at FROM jobs WHERE status = 'queued'")][0];
     if (row?.next_attempt_at) await this.ctx.storage.setAlarm(row.next_attempt_at);
   }
+
+  private purgeExpired(): void {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM jobs WHERE status IN ('completed', 'failed') AND updated_at < ?",
+      Date.now() - retentionMs(this.env),
+    );
+  }
 }
 
 interface JobRow extends Record<string, SqlStorageValue> { id: string; request_json: string; status: AsyncJob["status"]; created_at: number; updated_at: number; next_attempt_at: number; attempts: number; result_json: string | null; error: string | null; }
@@ -117,5 +127,6 @@ function publicJob(row: JobRow): AsyncJob { return { id: row.id, status: row.sta
 function numberSetting(value: string | undefined, fallback: number): number { const parsed = Number(value); return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback; }
 function nvidiaSettings(env: Env): ProviderRateLimitSettings { return { dailySafetyBudgetTokens: Number(env.NVIDIA_DAILY_SAFETY_BUDGET_TOKENS ?? "0"), cooldownMs: numberSetting(env.NVIDIA_COOLDOWN_MS, 900000), maxConcurrent: numberSetting(env.NVIDIA_MAX_CONCURRENT, 1), reservationTtlMs: numberSetting(env.NVIDIA_RESERVATION_TTL_MS, 120000) }; }
 function maxAttempts(env: Env): number { return numberSetting(env.ASYNC_JOB_MAX_ATTEMPTS, 5); }
+function retentionMs(env: Env): number { return numberSetting(env.ASYNC_JOB_RETENTION_MS, 86_400_000); }
 function retryAfter(response: Response): number | undefined { const seconds = Number(response.headers.get("retry-after")); return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : undefined; }
 function stripReasoning(payload: Record<string, unknown>): void { if (!Array.isArray(payload.choices)) return; for (const choice of payload.choices) { const message = choice && typeof choice === "object" ? (choice as Record<string, unknown>).message : undefined; if (message && typeof message === "object") { delete (message as Record<string, unknown>).reasoning; delete (message as Record<string, unknown>).reasoning_content; } } }
