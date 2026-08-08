@@ -9,6 +9,7 @@
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:integration": "node scripts/integration-smoke.mjs",
     "test:watch": "vitest"
   },
   "devDependencies": {

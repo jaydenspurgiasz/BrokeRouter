@@ -43,7 +43,13 @@ export function configuredOpenAiCompatibleProviders(
     if (!isExtraProviderConfig(candidate)) return [];
     const apiKey = bindings[candidate.apiKeyBinding];
     if (typeof apiKey !== "string" || !apiKey) return [];
-    const models = candidate.models.map((model) => ({ ...model, provider: candidate.id }));
+    const models = candidate.models.map((model) => ({
+      ...model,
+      // `free/default` remains a routing alias. Every concrete provider model gets a unique
+      // explicit ID so callers and integration tests can force a provider deterministically.
+      id: model.id === "free/default" ? `${candidate.id}/free/default` : model.id,
+      provider: candidate.id,
+    }));
     const rateLimits = { ...defaults, ...candidate.rateLimits };
     return [{
       id: candidate.id,

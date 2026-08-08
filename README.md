@@ -109,6 +109,18 @@ The NVIDIA adapter is built in. Add any provider with an OpenAI-compatible Chat 
 
 Declare `GROQ_API_KEY` as a secret, not in this JSON. Multiple configured providers share the request's routing candidate list but never share quota state: each `id` + `credentialScope` has its own coordinator. Replace the example model and limits with the provider's actual published capabilities and allowances.
 
+`free/default` is a router alias: it considers every eligible free model. Provider configuration turns that entry into a unique explicit model ID—for example `gemini/free/default`—so a caller can force one provider during a diagnostic test.
+
+## Integration smoke test
+
+With `npm run dev -- --local` running and both NVIDIA and Gemini configured, run:
+
+```bash
+npm run test:integration
+```
+
+The test invokes the live local gateway and asserts health, provider catalog, forced NVIDIA and Gemini routes, streaming, reasoning-trace sanitization, and the async-job lifecycle. It spends a small amount of free-tier quota. Override `BROKE_ROUTER_URL` or `BROKE_ROUTER_API_KEY` when needed.
+
 ## Current model aliases
 
 - `free/default` — text-oriented NVIDIA default.
