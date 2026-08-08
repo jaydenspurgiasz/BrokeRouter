@@ -32,7 +32,9 @@ export default {
     try {
       const url = new URL(request.url);
       if (url.pathname === "/health") return Response.json({ ok: true, service: "broke-router" });
-      if (url.pathname === "/v1/models" && request.method === "GET") return Response.json({ object: "list", data: NVIDIA_MODELS });
+      if (url.pathname === "/v1/models" && request.method === "GET") {
+        return Response.json({ object: "list", data: registeredProviders(env).flatMap((provider) => provider.models) });
+      }
       if (url.pathname === "/v1/jobs" && request.method === "POST") {
         authorize(request, env);
         const generation = await parseGenerationRequest(request);
