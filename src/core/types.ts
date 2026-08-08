@@ -69,6 +69,7 @@ export interface ProviderRateLimitSettings {
 export type RouterErrorCode =
   | "invalid_request"
   | "authentication_error"
+  | "server_configuration_error"
   | "context_unavailable"
   | "provider_unavailable"
   | "upstream_error";

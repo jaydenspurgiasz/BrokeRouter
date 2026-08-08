@@ -36,7 +36,7 @@ export default {
         return Response.json({ object: "list", data: registeredProviders(env).flatMap((provider) => provider.models) });
       }
       if (url.pathname === "/v1/jobs" && request.method === "POST") {
-        authorize(request, env);
+        await authorize(request, env);
         const generation = await parseGenerationRequest(request);
         const job = await env.ASYNC_JOB_QUEUE.getByName("default").fetch("https://queue/enqueue", {
           method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(generation),
@@ -44,7 +44,7 @@ export default {
         return Response.json({ ...job, status_url: `/v1/jobs/${job.id}` }, { status: 202 });
       }
       if (url.pathname.startsWith("/v1/jobs/") && request.method === "GET") {
-        authorize(request, env);
+        await authorize(request, env);
         const response = await env.ASYNC_JOB_QUEUE.getByName("default").fetch(`https://queue/jobs/${url.pathname.slice("/v1/jobs/".length)}`);
         return response.status === 404 ? openAiError("invalid_request", "Job not found", 404) : response;
       }
@@ -52,7 +52,7 @@ export default {
         return openAiError("invalid_request", "Not found", 404);
       }
 
-      authorize(request, env);
+      await authorize(request, env);
       const generation = await parseGenerationRequest(request);
       const providers = registeredProviders(env);
       const admission = await admitEligibleRoute(selectRoutes(generation, providers.flatMap((provider) => provider.models)), providers, env);
@@ -89,11 +89,26 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
-function authorize(request: Request, env: Env): void {
-  if (!env.ROUTER_API_KEY) return;
-  if (request.headers.get("authorization") !== `Bearer ${env.ROUTER_API_KEY}`) {
+async function authorize(request: Request, env: Env): Promise<void> {
+  if (!env.ROUTER_API_KEY) {
+    throw new RouterError("server_configuration_error", "ROUTER_API_KEY is not configured.", 503);
+  }
+  if (!(await constantTimeEqual(request.headers.get("authorization") ?? "", `Bearer ${env.ROUTER_API_KEY}`))) {
     throw new RouterError("authentication_error", "Invalid router API key.", 401);
   }
+}
+
+async function constantTimeEqual(left: string, right: string): Promise<boolean> {
+  const encoder = new TextEncoder();
+  const [leftDigest, rightDigest] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(left)),
+    crypto.subtle.digest("SHA-256", encoder.encode(right)),
+  ]);
+  const leftBytes = new Uint8Array(leftDigest);
+  const rightBytes = new Uint8Array(rightDigest);
+  let difference = 0;
+  for (let index = 0; index < leftBytes.length; index += 1) difference |= leftBytes[index] ^ rightBytes[index];
+  return difference === 0;
 }
 
 async function parseGenerationRequest(request: Request): Promise<GenerationRequest> {

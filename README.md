@@ -2,6 +2,8 @@
 
 Free-tier-aware LLM routing for agents that should not accidentally spend money. The first deployment target is Cloudflare Workers and the first provider is NVIDIA's API Catalog, but the routing core deliberately uses Web APIs and provider/state ports rather than Cloudflare or NVIDIA concepts.
 
+Production access is internal-only: BrokeRouter disables `workers.dev` and is meant to be called from your own Cloudflare Workers through Service Bindings. See [the security model](docs/security.md).
+
 ## What exists
 
 - OpenAI-compatible `POST /v1/chat/completions`, with streaming forwarded without buffering.
