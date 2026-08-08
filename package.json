@@ -1,0 +1,21 @@
+{
+  "name": "broke-router",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A free-tier-aware, provider-agnostic LLM router. Cloudflare + NVIDIA is the first adapter.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.20.2",
+    "@cloudflare/workers-types": "^5.20260804.1",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.119.0"
+  }
+}

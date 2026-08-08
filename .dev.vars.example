@@ -1,0 +1,4 @@
+# Never commit a real NVIDIA key. Copy this file to .dev.vars for local use.
+NVIDIA_API_KEY=
+# Optional for a public HTTP deployment. Internal Worker Service Bindings need no key.
+ROUTER_API_KEY=
