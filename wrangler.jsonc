@@ -7,10 +7,12 @@
   "durable_objects": {
     "bindings": [
       { "name": "QUOTA_COORDINATOR", "class_name": "QuotaCoordinator" }
+      ,{ "name": "ASYNC_JOB_QUEUE", "class_name": "AsyncJobQueue" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["QuotaCoordinator"] }
+    { "tag": "v1", "new_sqlite_classes": ["QuotaCoordinator"] },
+    { "tag": "v2", "new_sqlite_classes": ["AsyncJobQueue"] }
   ],
   "vars": {
     "NVIDIA_DAILY_SAFETY_BUDGET_TOKENS": "0",
@@ -21,6 +23,7 @@
     "NVIDIA_TOKEN_WINDOW_MS": "60000",
     "NVIDIA_MAX_CONCURRENT": "1",
     "NVIDIA_RESERVATION_TTL_MS": "120000",
-    "MAX_INLINE_WAIT_MS": "2000"
+    "MAX_INLINE_WAIT_MS": "2000",
+    "ASYNC_JOB_MAX_ATTEMPTS": "5"
   }
 }

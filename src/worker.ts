@@ -4,8 +4,9 @@ import { selectRoutes } from "./core/route";
 import { invokeNvidia } from "./providers/nvidia";
 import { configuredOpenAiCompatibleProviders, type RegisteredProvider } from "./providers/openai-compatible";
 import { QuotaCoordinator } from "./adapters/cloudflare/quota-coordinator";
+import { AsyncJobQueue } from "./adapters/cloudflare/async-job-queue";
 
-export { QuotaCoordinator };
+export { QuotaCoordinator, AsyncJobQueue };
 
 export interface Env {
   NVIDIA_API_KEY: string;
@@ -19,8 +20,10 @@ export interface Env {
   NVIDIA_MAX_CONCURRENT?: string;
   NVIDIA_RESERVATION_TTL_MS?: string;
   MAX_INLINE_WAIT_MS?: string;
+  ASYNC_JOB_MAX_ATTEMPTS?: string;
   ADDITIONAL_OPENAI_COMPATIBLE_PROVIDERS_JSON?: string;
   QUOTA_COORDINATOR: DurableObjectNamespace<QuotaCoordinator>;
+  ASYNC_JOB_QUEUE: DurableObjectNamespace<AsyncJobQueue>;
 }
 
 export default {
@@ -29,6 +32,19 @@ export default {
       const url = new URL(request.url);
       if (url.pathname === "/health") return Response.json({ ok: true, service: "broke-router" });
       if (url.pathname === "/v1/models" && request.method === "GET") return Response.json({ object: "list", data: NVIDIA_MODELS });
+      if (url.pathname === "/v1/jobs" && request.method === "POST") {
+        authorize(request, env);
+        const generation = await parseGenerationRequest(request);
+        const job = await env.ASYNC_JOB_QUEUE.getByName("default").fetch("https://queue/enqueue", {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(generation),
+        }).then((response) => response.json<{ id: string; status: string; createdAt: number; updatedAt: number }>());
+        return Response.json({ ...job, status_url: `/v1/jobs/${job.id}` }, { status: 202 });
+      }
+      if (url.pathname.startsWith("/v1/jobs/") && request.method === "GET") {
+        authorize(request, env);
+        const response = await env.ASYNC_JOB_QUEUE.getByName("default").fetch(`https://queue/jobs/${url.pathname.slice("/v1/jobs/".length)}`);
+        return response.status === 404 ? openAiError("invalid_request", "Job not found", 404) : response;
+      }
       if (url.pathname !== "/v1/chat/completions" || request.method !== "POST") {
         return openAiError("invalid_request", "Not found", 404);
       }

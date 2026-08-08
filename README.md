@@ -12,6 +12,27 @@ Free-tier-aware LLM routing for agents that should not accidentally spend money.
 
 The router does **not** own chat history, agent memory, prompt compaction, or tool execution. It preserves the entire request or fails clearly; an agent owns any compaction decision.
 
+## Deferred jobs
+
+For non-interactive free-tier work, submit the same non-streaming chat request to `POST /v1/jobs`. It returns `202` and a `status_url`; poll that URL until the status is `completed` or `failed`. The queue is stored in a SQLite-backed Durable Object and scheduled with alarms, so it survives Worker restarts and waits for a rate-limit slot without holding an HTTP request open.
+
+```text
+POST /v1/jobs                 → { "id": "…", "status": "queued", "status_url": "/v1/jobs/…" }
+GET  /v1/jobs/{id}            → queued | running | completed | failed
+```
+
+Jobs are deliberately non-streaming and currently execute through the NVIDIA adapter. They retry temporary upstream failures up to `ASYNC_JOB_MAX_ATTEMPTS` (default `5`), preserve only the request/result needed for completion, and remove reasoning traces from completed results. Use synchronous chat completions for interactive agent turns.
+
+## Provider options
+
+NVIDIA thinking is available through the router's portable routing hint:
+
+```json
+{ "route": { "reasoning": "on" } }
+```
+
+It is off by default to protect free-tier output budgets. The router strips reasoning traces from returned responses even when reasoning is enabled; your agent receives the final answer and tool calls, not hidden chain-of-thought. Other provider-specific controls require an adapter-level option mapping before they are exposed as portable router fields.
+
 ## Local setup
 
 ```bash
