@@ -2,9 +2,11 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 
 const rateFallback = process.argv.includes("--rate-fallback");
-const port = rateFallback ? 8791 : 8792;
+const callerLimit = process.argv.includes("--caller-limit");
+const port = rateFallback ? 8791 : callerLimit ? 8793 : 8792;
 const baseUrl = `http://127.0.0.1:${port}`;
 const stateDir = await mkdtemp(join(tmpdir(), "broke-router-integration-"));
 const argumentsList = [
@@ -16,6 +18,18 @@ if (rateFallback) argumentsList.push(
   "--var", "NVIDIA_REQUEST_WINDOW_MS:60000",
   "--var", "MAX_INLINE_WAIT_MS:0",
 );
+const callerSecret = "caller-limit-integration-secret-that-is-not-production";
+if (callerLimit) {
+  const keyHash = createHash("sha256").update(callerSecret).digest("hex");
+  const registry = JSON.stringify({
+    "rate-client": {
+      keyHash, environment: "evaluation",
+      scopes: ["models:read", "chat:write", "stats:read", "policy:write"],
+      limits: { requests: { limit: 1, windowMs: 60_000 }, reservationTtlMs: 120_000 },
+    },
+  });
+  argumentsList.push("--var", `CALLER_CREDENTIALS_JSON:${registry}`);
+}
 const wrangler = spawn(process.execPath, argumentsList, {
   cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
 });
@@ -53,6 +67,8 @@ function runSmokeTest() {
         ...process.env,
         BROKE_ROUTER_URL: baseUrl,
         BROKE_ROUTER_EXPECT_RATE_FALLBACK: rateFallback ? "1" : "0",
+        BROKE_ROUTER_EXPECT_CALLER_LIMIT: callerLimit ? "1" : "0",
+        ...(callerLimit ? { BROKE_ROUTER_API_KEY: `brk_rate-client.${callerSecret}` } : {}),
       },
       windowsHide: true,
     });

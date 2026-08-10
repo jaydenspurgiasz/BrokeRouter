@@ -4,16 +4,19 @@
   "workers_dev": false,
   "main": "src/worker.ts",
   "compatibility_date": "2026-08-06",
-  "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
       { "name": "QUOTA_COORDINATOR", "class_name": "QuotaCoordinator" }
+      ,{ "name": "CALLER_QUOTA_COORDINATOR", "class_name": "QuotaCoordinator" }
       ,{ "name": "ASYNC_JOB_QUEUE", "class_name": "AsyncJobQueue" }
+      ,{ "name": "ROUTING_STATE", "class_name": "RoutingState" }
+      ,{ "name": "WORKFLOW_COORDINATOR", "class_name": "WorkflowCoordinator" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["QuotaCoordinator"] },
-    { "tag": "v2", "new_sqlite_classes": ["AsyncJobQueue"] }
+    { "tag": "v2", "new_sqlite_classes": ["AsyncJobQueue"] },
+    { "tag": "v3", "new_sqlite_classes": ["RoutingState", "WorkflowCoordinator"] }
   ],
   "vars": {
     "NVIDIA_DAILY_SAFETY_BUDGET_TOKENS": "0",
@@ -26,6 +29,44 @@
     "NVIDIA_RESERVATION_TTL_MS": "120000",
     "MAX_INLINE_WAIT_MS": "2000",
     "ASYNC_JOB_MAX_ATTEMPTS": "5",
-    "ASYNC_JOB_RETENTION_MS": "86400000"
+    "ASYNC_JOB_RETENTION_MS": "86400000",
+    "ROUTING_EVENT_RETENTION_MS": "2592000000",
+    "WORKFLOW_RETENTION_MS": "2592000000",
+    "ROUTING_POLICY_MODE": "shadow",
+    "ADAPTIVE_EXPLORATION_RATE": "0.05",
+    "ADAPTIVE_MIN_OBSERVATIONS": "30"
+  },
+  "env": {
+    "staging": {
+      "name": "broke-router-staging",
+      "workers_dev": false,
+      "durable_objects": {
+        "bindings": [
+          { "name": "QUOTA_COORDINATOR", "class_name": "QuotaCoordinator" },
+          { "name": "CALLER_QUOTA_COORDINATOR", "class_name": "QuotaCoordinator" },
+          { "name": "ASYNC_JOB_QUEUE", "class_name": "AsyncJobQueue" },
+          { "name": "ROUTING_STATE", "class_name": "RoutingState" },
+          { "name": "WORKFLOW_COORDINATOR", "class_name": "WorkflowCoordinator" }
+        ]
+      },
+      "vars": {
+        "NVIDIA_DAILY_SAFETY_BUDGET_TOKENS": "0",
+        "NVIDIA_COOLDOWN_MS": "900000",
+        "NVIDIA_REQUESTS_PER_WINDOW": "0",
+        "NVIDIA_REQUEST_WINDOW_MS": "60000",
+        "NVIDIA_TOKENS_PER_WINDOW": "0",
+        "NVIDIA_TOKEN_WINDOW_MS": "60000",
+        "NVIDIA_MAX_CONCURRENT": "1",
+        "NVIDIA_RESERVATION_TTL_MS": "120000",
+        "MAX_INLINE_WAIT_MS": "2000",
+        "ASYNC_JOB_MAX_ATTEMPTS": "5",
+        "ASYNC_JOB_RETENTION_MS": "86400000",
+        "ROUTING_EVENT_RETENTION_MS": "2592000000",
+        "WORKFLOW_RETENTION_MS": "2592000000",
+        "ROUTING_POLICY_MODE": "shadow",
+        "ADAPTIVE_EXPLORATION_RATE": "0.05",
+        "ADAPTIVE_MIN_OBSERVATIONS": "10"
+      }
+    }
   }
 }

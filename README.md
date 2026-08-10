@@ -12,8 +12,34 @@ Production access is private: Cloudflare agents use Service Bindings, while loca
 - A SQLite-backed Durable Object that atomically enforces request windows, token windows, concurrent-call caps, a daily safety budget, and persisted cooldowns after upstream failures or 429s.
 - A capability registry that refuses calls which would lose context, tools, streaming, or vision support.
 - A gate-first planner that inspects provider availability concurrently, then ranks only passing providers with a versioned deterministic best-fit policy.
+- Durable workflow budgets, deadlines, concurrency leases, provider affinity, and terminal quality feedback.
+- Metadata-only online learning with hierarchical Bayesian provider statistics.
+- Baseline, shadow, and adaptive policy modes with bounded exploration, logged propensities, and immediate rollback.
+- Built-in IPS/SNIPS shadow-policy evaluation and effective-sample-size reporting.
 
 The router does **not** own chat history, agent memory, prompt compaction, or tool execution. It preserves the entire request or fails clearly; an agent owns any compaction decision.
+
+## Workflow routing
+
+Create a workflow before an agentic run:
+
+```http
+POST /v1/workflows
+
+{
+  "workflowType": "coding-agent",
+  "expectedCalls": 5,
+  "maxCalls": 10,
+  "maxConcurrency": 3,
+  "estimatedTotalTokens": 30000,
+  "qualityTier": "reasoning",
+  "priority": 75
+}
+```
+
+Send its returned ID as `route.workflowId` on every chat call, then report the terminal result to `POST /v1/workflows/{id}/outcome`. The Durable Object owns call limits and concurrency; request-supplied estimates cannot override its state.
+
+See [adaptive policy design](docs/adr/0004-hierarchical-bayesian-online-policy.md), [implementation status](docs/adaptive-routing-roadmap.md), and [deployment](docs/deployment.md).
 
 ## Deferred jobs
 
@@ -76,6 +102,11 @@ const response = await env.LLM_GATEWAY.fetch("https://broke-router/v1/chat/compl
 | `NVIDIA_MAX_CONCURRENT` | Maximum in-flight calls using the shared NVIDIA credential. Defaults to `1` for conservative free-tier use. |
 | `NVIDIA_RESERVATION_TTL_MS` | Recovery period for an in-flight reservation abandoned by a crashed invocation. |
 | `MAX_INLINE_WAIT_MS` | Maximum time an interactive request may wait for the earliest slot before returning `503`. Defaults to 2 seconds. |
+| `ROUTING_POLICY_MODE` | Safe default policy: `baseline`, `shadow`, or `adaptive`. Durable runtime control overrides it. |
+| `ADAPTIVE_EXPLORATION_RATE` | Default epsilon, clamped to `0..0.25`. |
+| `ADAPTIVE_MIN_OBSERVATIONS` | Evidence required before adaptive routing can control traffic. |
+| `ROUTING_EVENT_RETENTION_MS` | Metadata-only decision/outcome retention. Defaults to 30 days. |
+| `WORKFLOW_RETENTION_MS` | Terminal workflow retention. Defaults to 30 days. |
 
 `NVIDIA_DAILY_SAFETY_BUDGET_TOKENS` is a local safety control, not a claim that NVIDIA provides that exact quota. The coordinator estimates and reserves input + requested maximum output before sending a call, then uses a provider error as authoritative evidence to halt attempts.
 

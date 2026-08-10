@@ -6,12 +6,13 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "wrangler deploy --env=",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:integration": "node scripts/integration-smoke.mjs",
     "test:integration:isolated": "node scripts/integration-isolated.mjs",
     "test:integration:rate-fallback": "node scripts/integration-isolated.mjs --rate-fallback",
+    "test:integration:caller-limit": "node scripts/integration-isolated.mjs --caller-limit",
     "auth:key": "node scripts/generate-caller-key.mjs",
     "test:watch": "vitest"
   },

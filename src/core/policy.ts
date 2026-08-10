@@ -48,11 +48,13 @@ export function rankCandidates(request: GenerationRequest, candidates: Available
       : request.route?.tier
         ? (candidate.selection.model.tier === request.route.tier ? 50 : 0)
         : 0;
+    const switchingPenalty = request.route?.preferredProviderId
+      && request.route.preferredProviderId !== candidate.providerId ? 120 : 0;
     return {
       ...candidate,
       policy: "deterministic-best-fit-v1" as const,
       // Catalog order is the stable final tie-breaker. Workflow fit dominates soft preferences.
-      score: (workflowFits ? 10_000 : 0) + capacityScore + tierScore - candidate.catalogOrder / 1_000,
+      score: (workflowFits ? 10_000 : 0) + capacityScore + tierScore - switchingPenalty - candidate.catalogOrder / 1_000,
     };
   }).sort((left, right) => right.score - left.score || left.catalogOrder - right.catalogOrder);
 }

@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../../config";
-import { RouterError, type GenerationRequest } from "../../core/types";
+import { RouterError, type GenerationRequest, type ProviderRateLimitSettings } from "../../core/types";
 import { executeGeneration } from "./execution";
 
 export interface AsyncJob {
@@ -19,7 +19,9 @@ export class AsyncJobQueue extends DurableObject<Env> {
     ctx.blockConcurrencyWhile(async () => {
       ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS jobs (
-          id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, request_json TEXT NOT NULL, status TEXT NOT NULL,
+          id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, owner_environment TEXT NOT NULL,
+          owner_limits_json TEXT NOT NULL,
+          request_json TEXT NOT NULL, status TEXT NOT NULL,
           created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, next_attempt_at INTEGER NOT NULL,
           attempts INTEGER NOT NULL, result_json TEXT, error TEXT
         );
@@ -28,18 +30,26 @@ export class AsyncJobQueue extends DurableObject<Env> {
       if (!columns.some((column) => column.name === "owner_id")) {
         ctx.storage.sql.exec("ALTER TABLE jobs ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'legacy-local'");
       }
+      if (!columns.some((column) => column.name === "owner_environment")) {
+        ctx.storage.sql.exec("ALTER TABLE jobs ADD COLUMN owner_environment TEXT NOT NULL DEFAULT 'development'");
+      }
+      if (!columns.some((column) => column.name === "owner_limits_json")) {
+        ctx.storage.sql.exec("ALTER TABLE jobs ADD COLUMN owner_limits_json TEXT NOT NULL DEFAULT '{}'");
+      }
       ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS jobs_owner_id ON jobs(owner_id, id)");
     });
   }
 
-  async enqueue(request: GenerationRequest, callerId: string): Promise<AsyncJob> {
+  async enqueue(
+    request: GenerationRequest, callerId: string, environment: string, rateLimits: ProviderRateLimitSettings,
+  ): Promise<AsyncJob> {
     if (request.stream) throw new Error("Async jobs do not support streaming");
     this.purgeExpired();
     const now = Date.now();
     const id = crypto.randomUUID();
     this.ctx.storage.sql.exec(
-      "INSERT INTO jobs (id, owner_id, request_json, status, created_at, updated_at, next_attempt_at, attempts) VALUES (?, ?, ?, 'queued', ?, ?, ?, 0)",
-      id, callerId, JSON.stringify(request), now, now, now,
+      "INSERT INTO jobs (id, owner_id, owner_environment, owner_limits_json, request_json, status, created_at, updated_at, next_attempt_at, attempts) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, 0)",
+      id, callerId, environment, JSON.stringify(rateLimits), JSON.stringify(request), now, now, now,
     );
     await this.scheduleNext();
     return { id, status: "queued", createdAt: now, updatedAt: now };
@@ -48,8 +58,10 @@ export class AsyncJobQueue extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/enqueue" && request.method === "POST") {
-      const payload = await request.json<{ request: GenerationRequest; callerId: string }>();
-      return Response.json(await this.enqueue(payload.request, payload.callerId));
+      const payload = await request.json<{
+        request: GenerationRequest; callerId: string; environment: string; rateLimits: ProviderRateLimitSettings;
+      }>();
+      return Response.json(await this.enqueue(payload.request, payload.callerId, payload.environment, payload.rateLimits));
     }
     if (url.pathname.startsWith("/jobs/") && request.method === "GET") {
       const job = await this.getJob(
@@ -88,7 +100,14 @@ export class AsyncJobQueue extends DurableObject<Env> {
         request,
         this.env,
         (promise) => this.ctx.waitUntil(promise),
-        { allowInlineWait: false },
+        {
+          allowInlineWait: false,
+          identity: {
+            callerId: job.owner_id,
+            environment: job.owner_environment,
+            rateLimits: JSON.parse(job.owner_limits_json) as ProviderRateLimitSettings,
+          },
+        },
       );
       if (!response.ok) {
         const temporary = response.status === 429 || response.status >= 500;
@@ -143,6 +162,8 @@ export class AsyncJobQueue extends DurableObject<Env> {
 interface JobRow extends Record<string, SqlStorageValue> {
   id: string;
   owner_id: string;
+  owner_environment: string;
+  owner_limits_json: string;
   request_json: string;
   status: AsyncJob["status"];
   created_at: number;

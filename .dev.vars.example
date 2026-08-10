@@ -2,4 +2,4 @@
 NVIDIA_API_KEY=
 # Local migration fallback. Production uses the hashed CALLER_CREDENTIALS_JSON secret.
 ROUTER_API_KEY=
-# CALLER_CREDENTIALS_JSON={"local-laptop":{"keyHash":"...","environment":"development","scopes":["models:read","chat:write","jobs:write","jobs:read"]}}
+# CALLER_CREDENTIALS_JSON={"local-laptop":{"keyHash":"...","environment":"development","scopes":["models:read","chat:write","jobs:write","jobs:read","workflows:write","workflows:read","stats:read","policy:write"]}}

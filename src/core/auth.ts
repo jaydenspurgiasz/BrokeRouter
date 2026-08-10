@@ -1,12 +1,14 @@
 import type { Env } from "../config";
-import { RouterError } from "./types";
+import { RouterError, type ProviderRateLimitSettings } from "./types";
 
-export type CallerScope = "models:read" | "chat:write" | "jobs:write" | "jobs:read" | "providers:paid";
+export type CallerScope = "models:read" | "chat:write" | "jobs:write" | "jobs:read"
+  | "workflows:write" | "workflows:read" | "stats:read" | "policy:write" | "providers:paid";
 
 export interface AuthenticatedCaller {
   id: string;
   environment: "production" | "staging" | "development" | "evaluation";
   scopes: ReadonlySet<CallerScope>;
+  rateLimits: ProviderRateLimitSettings;
 }
 
 interface CredentialRecord {
@@ -14,9 +16,13 @@ interface CredentialRecord {
   environment?: AuthenticatedCaller["environment"];
   scopes?: CallerScope[];
   enabled?: boolean;
+  limits?: Partial<ProviderRateLimitSettings>;
 }
 
-const ALL_SCOPES: CallerScope[] = ["models:read", "chat:write", "jobs:write", "jobs:read"];
+const ALL_SCOPES: CallerScope[] = [
+  "models:read", "chat:write", "jobs:write", "jobs:read",
+  "workflows:write", "workflows:read", "stats:read", "policy:write",
+];
 const ENVIRONMENTS = new Set<AuthenticatedCaller["environment"]>(["production", "staging", "development", "evaluation"]);
 const SCOPES = new Set<CallerScope>([...ALL_SCOPES, "providers:paid"]);
 
@@ -42,13 +48,14 @@ export async function authenticateCaller(request: Request, env: Pick<Env, "CALLE
       id,
       environment: record.environment ?? "production",
       scopes: new Set(record.scopes ?? ALL_SCOPES),
+      rateLimits: callerLimits(record.limits),
     };
   }
 
   // Keeps existing local installations usable while they migrate. Production documentation
   // requires CALLER_CREDENTIALS_JSON so each agent can be revoked independently.
   if (env.ROUTER_API_KEY && await digestEqual(token, env.ROUTER_API_KEY)) {
-    return { id: "legacy-local", environment: "development", scopes: new Set(ALL_SCOPES) };
+    return { id: "legacy-local", environment: "development", scopes: new Set(ALL_SCOPES), rateLimits: callerLimits() };
   }
   if (!env.ROUTER_API_KEY) {
     throw new RouterError("server_configuration_error", "No caller credential registry is configured.", 503);
@@ -72,7 +79,8 @@ function parseRegistry(raw: string): Record<string, CredentialRecord> {
         || !record || typeof record !== "object"
         || typeof record.keyHash !== "string" || !/^[a-f0-9]{64}$/i.test(record.keyHash)
         || (record.environment !== undefined && !ENVIRONMENTS.has(record.environment))
-        || (record.scopes !== undefined && (!Array.isArray(record.scopes) || record.scopes.some((scope) => !SCOPES.has(scope))))) {
+        || (record.scopes !== undefined && (!Array.isArray(record.scopes) || record.scopes.some((scope) => !SCOPES.has(scope))))
+        || !validLimits(record.limits)) {
         throw new Error();
       }
     }
@@ -81,6 +89,32 @@ function parseRegistry(raw: string): Record<string, CredentialRecord> {
     throw new RouterError("server_configuration_error", "CALLER_CREDENTIALS_JSON is invalid.", 503);
   }
 }
+
+function callerLimits(limits?: Partial<ProviderRateLimitSettings>): ProviderRateLimitSettings {
+  return {
+    dailySafetyBudgetTokens: limits?.dailySafetyBudgetTokens ?? 0,
+    cooldownMs: 0,
+    requests: limits?.requests,
+    tokens: limits?.tokens,
+    maxConcurrent: limits?.maxConcurrent,
+    reservationTtlMs: limits?.reservationTtlMs ?? 120_000,
+  };
+}
+
+function validLimits(limits: Partial<ProviderRateLimitSettings> | undefined): boolean {
+  if (limits === undefined) return true;
+  if (!limits || typeof limits !== "object" || Array.isArray(limits)) return false;
+  return nonNegative(limits.dailySafetyBudgetTokens)
+    && positiveOptional(limits.maxConcurrent)
+    && positiveOptional(limits.reservationTtlMs)
+    && validWindow(limits.requests)
+    && validWindow(limits.tokens);
+}
+function validWindow(window: ProviderRateLimitSettings["requests"]): boolean {
+  return window === undefined || Boolean(window && positiveOptional(window.limit) && positiveOptional(window.windowMs));
+}
+function nonNegative(value: number | undefined): boolean { return value === undefined || Number.isFinite(value) && value >= 0; }
+function positiveOptional(value: number | undefined): boolean { return value === undefined || Number.isFinite(value) && value > 0; }
 
 async function digestEqual(left: string, right: string): Promise<boolean> {
   const [leftDigest, rightDigest] = await Promise.all([sha256Hex(left), sha256Hex(right)]);

@@ -38,6 +38,8 @@ export interface GenerationRequest {
     estimatedTotalTokens?: number;
     deadlineMs?: number;
     qualityTier?: "economy" | "balanced" | "reasoning";
+    /** Set only from a server-owned workflow record; public values are discarded. */
+    preferredProviderId?: string;
   };
   [key: string]: unknown;
 }
@@ -81,6 +83,8 @@ export type RouterErrorCode =
   | "authorization_error"
   | "server_configuration_error"
   | "context_unavailable"
+  | "workflow_unavailable"
+  | "caller_rate_limited"
   | "provider_unavailable"
   | "upstream_error";
 
