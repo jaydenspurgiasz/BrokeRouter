@@ -1,12 +1,35 @@
-# Internal access model
+# Private access model
 
-BrokeRouter is an internal Worker, not a public API. `workers_dev` is disabled in `wrangler.jsonc`; deploy it with no public route or custom domain. Cloudflare Service Bindings are the primary authorization boundary: only your own Workers that explicitly declare a binding can invoke it.
+BrokeRouter supports two private transports into one authoritative Worker:
 
-Every caller must also include the `ROUTER_API_KEY` bearer token. Store the same secret in BrokeRouter and each authorized agent Worker with `wrangler secret put`; do not commit it or put it in a Worker variable. BrokeRouter uses constant-time comparison for this value. The Service Binding prevents Internet access; the bearer key prevents an accidental route or overly broad internal binding from becoming an unprotected gateway.
+```text
+Cloudflare agent --Service Binding---------------------> BrokeRouter
+Local agent ------Access-protected custom hostname----> BrokeRouter
+```
 
-## Agent Worker binding
+Keep `workers_dev` disabled. The external route must be a custom hostname protected by a Cloudflare Access service-token policy. Access blocks unauthorized Internet traffic before the Worker runs. Every transport must additionally provide an independently revocable BrokeRouter caller credential; this identifies the application and grants endpoint scopes.
 
-Add this to the **agent Worker's** Wrangler configuration, not BrokeRouter's:
+## Caller credentials
+
+Generate a high-entropy credential:
+
+```powershell
+npm run auth:key -- local-laptop
+```
+
+The command prints the caller token once and a registry entry containing only its SHA-256 hash. Combine entries into one JSON object and store it as the encrypted `CALLER_CREDENTIALS_JSON` Worker secret:
+
+```powershell
+npx wrangler secret put CALLER_CREDENTIALS_JSON
+```
+
+The registry record controls trusted caller identity, environment, enabled state, and scopes. The supported scopes are `models:read`, `chat:write`, `jobs:write`, `jobs:read`, and the deliberately non-default `providers:paid`. A request cannot set `route.allowPaid` unless its caller has `providers:paid`. Do not accept caller identity from a request header.
+
+`ROUTER_API_KEY` remains a local migration fallback only when no caller registry is configured. If `CALLER_CREDENTIALS_JSON` exists, the legacy key is never considered. Production must use the caller registry.
+
+## Cloudflare agent
+
+Add a Service Binding to the agent Worker:
 
 ```json
 {
@@ -16,17 +39,31 @@ Add this to the **agent Worker's** Wrangler configuration, not BrokeRouter's:
 }
 ```
 
-Then invoke the gateway internally:
+Store that agent's distinct caller token as its own Worker secret and invoke:
 
 ```ts
-const response = await env.LLM_GATEWAY.fetch("https://broke-router/v1/chat/completions", {
+await env.LLM_GATEWAY.fetch("https://broke-router/v1/chat/completions", {
   method: "POST",
   headers: {
     "content-type": "application/json",
-    "authorization": `Bearer ${env.ROUTER_API_KEY}`,
+    "authorization": `Bearer ${env.BROKE_ROUTER_CALLER_KEY}`,
   },
   body: JSON.stringify(request),
 });
 ```
 
-Use a distinct `ROUTER_API_KEY` for staging and production. Rotate it by updating the secret in BrokeRouter and every authorized agent Worker together. If you later need to give separate agents independently revocable credentials, add key IDs plus hashed per-agent keys; do not expose the gateway publicly just to solve that problem.
+## Local agent
+
+Create a Cloudflare Access service token and a service-auth policy for the custom router hostname. A local request sends both transport credentials and its BrokeRouter caller token:
+
+```http
+CF-Access-Client-Id: <access-service-token-id>
+CF-Access-Client-Secret: <access-service-token-secret>
+Authorization: Bearer brk_local-laptop.<caller-secret>
+```
+
+Store these values in the operating system's credential store or injected environment variables. Provider API keys stay exclusively in BrokeRouter.
+
+## Rotation and revocation
+
+Generate a replacement credential, update the encrypted registry, deploy it, update the one caller, and remove the old entry. Disabling or deleting one record does not affect other agents. Use separate registries, Access applications, provider secrets, and Durable Object namespaces for staging and production.

@@ -29,6 +29,15 @@ export interface GenerationRequest {
     allowPaid?: boolean;
     /** Off by default: reasoning traces are costly and not part of the public response contract. */
     reasoning?: "off" | "on";
+    /** Optimization context. These hints can affect ranking, never hard safety gates. */
+    workflowId?: string;
+    workflowType?: "single-turn" | "tool-agent" | "parallel-research" | "coding-agent" | "summarization" | "batch";
+    expectedCalls?: number;
+    maxCalls?: number;
+    maxConcurrency?: number;
+    estimatedTotalTokens?: number;
+    deadlineMs?: number;
+    qualityTier?: "economy" | "balanced" | "reasoning";
   };
   [key: string]: unknown;
 }
@@ -69,6 +78,7 @@ export interface ProviderRateLimitSettings {
 export type RouterErrorCode =
   | "invalid_request"
   | "authentication_error"
+  | "authorization_error"
   | "server_configuration_error"
   | "context_unavailable"
   | "provider_unavailable"

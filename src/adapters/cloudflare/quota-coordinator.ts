@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { ProviderRateLimitSettings } from "../../core/types";
-import type { Env } from "../../worker";
+import type { Env } from "../../config";
 
 export type AdmissionReason =
   | "cooldown"
@@ -14,6 +14,15 @@ export interface ReservationResult {
   reservationId?: string;
   retryAfterMs?: number;
   reason?: AdmissionReason;
+}
+
+export interface AdmissionQuote extends ReservationResult {
+  snapshot: {
+    requestCapacity?: number;
+    tokenCapacity?: number;
+    concurrentAvailable?: number;
+    dailyTokensRemaining?: number;
+  };
 }
 
 export interface UpstreamRateLimitObservation {
@@ -42,6 +51,31 @@ export class QuotaCoordinator extends DurableObject<Env> {
         );
       `);
     });
+  }
+
+  /** Non-mutating admission preview used to gate candidates before policy ranking. */
+  async inspect(tokens: number, settings: ProviderRateLimitSettings): Promise<AdmissionQuote> {
+    const now = Date.now();
+    this.releaseExpiredReservations(now, settings.reservationTtlMs);
+    const snapshot = this.snapshot(now, settings);
+    const cooldownUntil = this.read("cooldown_until");
+    if (cooldownUntil > now) return { ...denied("cooldown", cooldownUntil - now), snapshot };
+
+    const daily = `spent_${utcDay(now)}`;
+    const spent = this.read(daily);
+    const reservedToday = this.reservedTokensForDay(now);
+    if (settings.dailySafetyBudgetTokens > 0 && spent + reservedToday + tokens > settings.dailySafetyBudgetTokens) {
+      return { ...denied("safety_budget", msUntilNextUtcDay(now)), snapshot };
+    }
+
+    const requestDecision = this.checkBucket("requests", 1, settings.requests, now);
+    if (requestDecision) return { ...requestDecision, snapshot };
+    const tokenDecision = this.checkBucket("tokens", tokens, settings.tokens, now);
+    if (tokenDecision) return { ...tokenDecision, snapshot };
+    if (settings.maxConcurrent && this.reservationCount() >= settings.maxConcurrent) {
+      return { ...denied("concurrency_limit", this.retryAfterForConcurrency(now, settings.reservationTtlMs)), snapshot };
+    }
+    return { allowed: true, snapshot };
   }
 
   async reserve(tokens: number, settings: ProviderRateLimitSettings): Promise<ReservationResult> {
@@ -146,6 +180,25 @@ export class QuotaCoordinator extends DurableObject<Env> {
 
   private reservationCount(): number {
     return [...this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM reservations")][0]?.count ?? 0;
+  }
+
+  private snapshot(now: number, settings: ProviderRateLimitSettings): AdmissionQuote["snapshot"] {
+    const reservations = this.reservationCount();
+    const spent = this.read(`spent_${utcDay(now)}`) + this.reservedTokensForDay(now);
+    return {
+      requestCapacity: settings.requests
+        ? Math.floor(this.refilledBucket("requests", settings.requests, now) / 1_000)
+        : undefined,
+      tokenCapacity: settings.tokens
+        ? Math.floor(this.refilledBucket("tokens", settings.tokens, now) / 1_000)
+        : undefined,
+      concurrentAvailable: settings.maxConcurrent
+        ? Math.max(0, settings.maxConcurrent - reservations)
+        : undefined,
+      dailyTokensRemaining: settings.dailySafetyBudgetTokens > 0
+        ? Math.max(0, settings.dailySafetyBudgetTokens - spent)
+        : undefined,
+    };
   }
 
   private reservedTokensForDay(now: number): number {

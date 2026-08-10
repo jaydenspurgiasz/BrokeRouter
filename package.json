@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:integration": "node scripts/integration-smoke.mjs",
-    "test:integration:rate-fallback": "node scripts/integration-rate-fallback.mjs",
+    "test:integration:isolated": "node scripts/integration-isolated.mjs",
+    "test:integration:rate-fallback": "node scripts/integration-isolated.mjs --rate-fallback",
+    "auth:key": "node scripts/generate-caller-key.mjs",
     "test:watch": "vitest"
   },
   "devDependencies": {

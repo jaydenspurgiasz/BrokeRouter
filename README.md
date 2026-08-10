@@ -2,7 +2,7 @@
 
 Free-tier-aware LLM routing for agents that should not accidentally spend money. The first deployment target is Cloudflare Workers and the first provider is NVIDIA's API Catalog, but the routing core deliberately uses Web APIs and provider/state ports rather than Cloudflare or NVIDIA concepts.
 
-Production access is internal-only: BrokeRouter disables `workers.dev` and is meant to be called from your own Cloudflare Workers through Service Bindings. See [the security model](docs/security.md).
+Production access is private: Cloudflare agents use Service Bindings, while local agents use an Access-protected custom hostname. Both use independently revocable caller credentials. BrokeRouter disables `workers.dev`. See [the security model](docs/security.md) and [adaptive routing roadmap](docs/adaptive-routing-roadmap.md).
 
 ## What exists
 
@@ -11,6 +11,7 @@ Production access is internal-only: BrokeRouter disables `workers.dev` and is me
 - NVIDIA adapter using `https://integrate.api.nvidia.com/v1/chat/completions`.
 - A SQLite-backed Durable Object that atomically enforces request windows, token windows, concurrent-call caps, a daily safety budget, and persisted cooldowns after upstream failures or 429s.
 - A capability registry that refuses calls which would lose context, tools, streaming, or vision support.
+- A gate-first planner that inspects provider availability concurrently, then ranks only passing providers with a versioned deterministic best-fit policy.
 
 The router does **not** own chat history, agent memory, prompt compaction, or tool execution. It preserves the entire request or fails clearly; an agent owns any compaction decision.
 
@@ -23,7 +24,7 @@ POST /v1/jobs                 → { "id": "…", "status": "queued", "status_url
 GET  /v1/jobs/{id}            → queued | running | completed | failed
 ```
 
-Jobs are deliberately non-streaming and currently execute through the NVIDIA adapter. They retry temporary upstream failures up to `ASYNC_JOB_MAX_ATTEMPTS` (default `5`), preserve only the request/result needed for completion, remove reasoning traces from completed results, and purge completed/failed jobs after `ASYNC_JOB_RETENTION_MS` (24 hours by default). Use synchronous chat completions for interactive agent turns.
+Jobs are deliberately non-streaming and use the same multi-provider planner as interactive calls. Results are isolated to the caller that created them. Jobs retry temporary upstream failures up to `ASYNC_JOB_MAX_ATTEMPTS` (default `5`), preserve only the request/result needed for completion, remove reasoning traces, and purge completed/failed jobs after `ASYNC_JOB_RETENTION_MS` (24 hours by default).
 
 ## Provider options
 
@@ -49,7 +50,10 @@ The NVIDIA key is only read in the gateway Worker. An agent deployed as another 
 ```ts
 const response = await env.LLM_GATEWAY.fetch("https://broke-router/v1/chat/completions", {
   method: "POST",
-  headers: { "content-type": "application/json" },
+  headers: {
+    "content-type": "application/json",
+    "authorization": `Bearer ${env.BROKE_ROUTER_CALLER_KEY}`,
+  },
   body: JSON.stringify({
     model: "free/default",
     messages: [{ role: "user", content: "Hello" }],
@@ -63,7 +67,8 @@ const response = await env.LLM_GATEWAY.fetch("https://broke-router/v1/chat/compl
 | Variable | Meaning |
 | --- | --- |
 | `NVIDIA_API_KEY` | Required Worker secret. Never expose to callers. |
-| `ROUTER_API_KEY` | Optional bearer token required for public HTTP callers. Leave unset for Service-Binding-only use. |
+| `CALLER_CREDENTIALS_JSON` | Required production secret containing hashed per-caller credentials, environments, and scopes. |
+| `ROUTER_API_KEY` | Transitional single-key fallback for local development only; ignored when the caller registry exists. |
 | `NVIDIA_DAILY_SAFETY_BUDGET_TOKENS` | Local hard ceiling for a shared NVIDIA credential. `0` means no known daily ceiling is enforced; 429s still create cooldowns. |
 | `NVIDIA_COOLDOWN_MS` | Conservative fallback cooldown when the upstream does not provide `Retry-After`. |
 | `NVIDIA_REQUESTS_PER_WINDOW` + `NVIDIA_REQUEST_WINDOW_MS` | Optional request-rate ceiling. Set requests to `0` to disable predictive enforcement. |
@@ -119,6 +124,12 @@ With `npm run dev -- --local` running and both NVIDIA and Gemini configured, run
 
 ```bash
 npm run test:integration
+```
+
+Or let the test own an isolated Wrangler process and temporary Durable Object state:
+
+```bash
+npm run test:integration:isolated
 ```
 
 The test invokes the live local gateway and asserts health, provider catalog, forced NVIDIA and Gemini routes, streaming, reasoning-trace sanitization, and the async-job lifecycle. It spends a small amount of free-tier quota. Override `BROKE_ROUTER_URL` or `BROKE_ROUTER_API_KEY` when needed.

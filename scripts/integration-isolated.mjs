@@ -3,16 +3,22 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const port = 8791;
+const rateFallback = process.argv.includes("--rate-fallback");
+const port = rateFallback ? 8791 : 8792;
 const baseUrl = `http://127.0.0.1:${port}`;
-const stateDir = await mkdtemp(join(tmpdir(), "broke-router-rate-test-"));
-const wrangler = spawn(process.execPath, [
-  "node_modules/wrangler/bin/wrangler.js", "dev", "--local", "--port", String(port), "--persist-to", stateDir,
+const stateDir = await mkdtemp(join(tmpdir(), "broke-router-integration-"));
+const argumentsList = [
+  "node_modules/wrangler/bin/wrangler.js", "dev", "--local", "--port", String(port),
+  "--persist-to", stateDir, "--show-interactive-dev-session=false",
+];
+if (rateFallback) argumentsList.push(
   "--var", "NVIDIA_REQUESTS_PER_WINDOW:1",
   "--var", "NVIDIA_REQUEST_WINDOW_MS:60000",
   "--var", "MAX_INLINE_WAIT_MS:0",
-  "--show-interactive-dev-session=false",
-], { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+);
+const wrangler = spawn(process.execPath, argumentsList, {
+  cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+});
 
 let workerOutput = "";
 wrangler.stdout.on("data", (chunk) => { workerOutput += chunk; });
@@ -46,7 +52,7 @@ function runSmokeTest() {
       env: {
         ...process.env,
         BROKE_ROUTER_URL: baseUrl,
-        BROKE_ROUTER_EXPECT_RATE_FALLBACK: "1",
+        BROKE_ROUTER_EXPECT_RATE_FALLBACK: rateFallback ? "1" : "0",
       },
       windowsHide: true,
     });

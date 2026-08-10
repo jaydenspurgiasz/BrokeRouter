@@ -1,11 +1,11 @@
 # Architecture
 
 ```text
-Agent Worker --Service Binding--> Gateway Worker --HTTPS--> Provider API
-                                      |
-                                      +--RPC--> credential-scoped Quota Coordinator
+Cloudflare Agent --Service Binding---> Gateway Worker --HTTPS--> Provider API
+Local Agent --Cloudflare Access------>       |
+                                               +--RPC--> credential-scoped Quota Coordinators
 ```
 
-The public HTTP surface and the Service-Binding surface use the same handler. `ROUTER_API_KEY` is optional because a Service Binding is already private; set it when exposing a public gateway endpoint.
+The public HTTP surface and Service-Binding surface use the same handler and independently revocable caller credentials. The custom public hostname is protected by Cloudflare Access; `workers.dev` remains disabled.
 
-For each request the gateway validates the request, filters models by non-negotiable capabilities and context fit, then asks each provider credential coordinator to admit it. Admission accounts for predictive request/token buckets, concurrent reservations, daily budget, and cooldowns. It calls the first available provider; if none can admit, it waits only for a small configured interactive queue window and otherwise returns `503` with `Retry-After`. Success and failure reconciliation is scheduled with `waitUntil`, so it does not delay bytes flowing from an SSE response. A provider failure or 429 marks the provider credential as cooling down. OpenAI-compatible providers are configured as registry entries with their own credential scope and limits; they cannot receive a request they cannot faithfully represent.
+For each request the gateway authenticates and authorizes the caller, filters models through non-negotiable capability/context gates, and concurrently inspects every candidate credential coordinator. Only providers passing admission gates reach the versioned routing policy. The router atomically reserves the policy winner and falls through to the next ranked candidate if it loses a race. Admission accounts for predictive request/token buckets, concurrent reservations, daily budget, and cooldowns. If none can admit, it waits only for a bounded interactive window and otherwise returns `503` with `Retry-After`. Success and failure reconciliation is scheduled with `waitUntil`, so it does not delay SSE bytes.

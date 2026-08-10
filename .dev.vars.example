@@ -1,4 +1,5 @@
 # Never commit a real NVIDIA key. Copy this file to .dev.vars for local use.
 NVIDIA_API_KEY=
-# Optional for a public HTTP deployment. Internal Worker Service Bindings need no key.
+# Local migration fallback. Production uses the hashed CALLER_CREDENTIALS_JSON secret.
 ROUTER_API_KEY=
+# CALLER_CREDENTIALS_JSON={"local-laptop":{"keyHash":"...","environment":"development","scopes":["models:read","chat:write","jobs:write","jobs:read"]}}

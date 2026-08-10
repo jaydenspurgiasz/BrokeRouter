@@ -33,7 +33,7 @@ await check("health endpoint", async () => {
 
 let models;
 await check("active provider catalog", async () => {
-  const response = await fetch(`${baseUrl}/v1/models`);
+  const response = await fetch(`${baseUrl}/v1/models`, { headers: { authorization: headers.authorization } });
   assert.equal(response.status, 200);
   models = (await response.json()).data;
   assert.ok(models.some((model) => model.provider === "nvidia"), "NVIDIA missing from /v1/models");
