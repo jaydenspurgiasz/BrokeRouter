@@ -6,6 +6,7 @@ import type { WorkflowCoordinator } from "./adapters/cloudflare/workflow-coordin
 /** Runtime bindings shared by the Worker and its Durable Objects. */
 export interface Env {
   NVIDIA_API_KEY: string;
+  NVIDIA_ENABLED?: string;
   /** Preferred multi-caller registry. Store as an encrypted Worker secret. */
   CALLER_CREDENTIALS_JSON?: string;
   /** Transitional single-key authentication for local development only. */

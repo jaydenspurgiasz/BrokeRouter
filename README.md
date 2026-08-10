@@ -173,6 +173,20 @@ npm run test:integration:rate-fallback
 
 The test starts a separate local Worker on port `8791`, injects a one-request NVIDIA limit only into that Worker, and uses isolated Durable Object storage. It issues two ordinary `free/default` requests, asserting the first routes to NVIDIA and the second automatically routes to Gemini because NVIDIA's request bucket is full. It then shuts down and deletes the temporary state; your `.dev.vars` and normal dev server are untouched.
 
+## Local performance benchmark
+
+Run the Worker against two deterministic loopback providers without spending API quota:
+
+```bash
+npm run benchmark:local
+```
+
+The harness measures latency percentiles, error-budget-aware throughput, saturation behavior,
+streaming time to first token, policy-mode cost, control-plane throughput, bundle size, and
+decision/outcome telemetry integrity. It writes ignored JSON and Markdown reports to
+`benchmarks/results/`. See `benchmarks/README.md` for methodology, load overrides, and the
+boundary between defensible local gateway metrics and real-provider end-to-end latency.
+
 ## Current model aliases
 
 - `free/default` — text-oriented NVIDIA default.

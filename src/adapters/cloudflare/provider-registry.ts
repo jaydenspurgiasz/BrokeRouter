@@ -13,7 +13,8 @@ export function registeredProviders(env: Env): RegisteredProvider[] {
     rateLimits: nvidiaLimits,
     invoke: (request, model) => invokeNvidia(request, model, env.NVIDIA_API_KEY),
   };
-  return [nvidia, ...configuredOpenAiCompatibleProviders(
+  const builtIns = env.NVIDIA_ENABLED === "false" ? [] : [nvidia];
+  return [...builtIns, ...configuredOpenAiCompatibleProviders(
     env.ADDITIONAL_OPENAI_COMPATIBLE_PROVIDERS_JSON,
     env as unknown as Record<string, unknown>,
     nvidiaLimits,

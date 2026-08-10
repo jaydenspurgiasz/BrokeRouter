@@ -19,6 +19,7 @@
     { "tag": "v3", "new_sqlite_classes": ["RoutingState", "WorkflowCoordinator"] }
   ],
   "vars": {
+    "NVIDIA_ENABLED": "true",
     "NVIDIA_DAILY_SAFETY_BUDGET_TOKENS": "0",
     "NVIDIA_COOLDOWN_MS": "900000",
     "NVIDIA_REQUESTS_PER_WINDOW": "0",
@@ -50,6 +51,7 @@
         ]
       },
       "vars": {
+        "NVIDIA_ENABLED": "true",
         "NVIDIA_DAILY_SAFETY_BUDGET_TOKENS": "0",
         "NVIDIA_COOLDOWN_MS": "900000",
         "NVIDIA_REQUESTS_PER_WINDOW": "0",
