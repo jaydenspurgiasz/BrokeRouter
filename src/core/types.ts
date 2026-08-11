@@ -53,6 +53,8 @@ export interface ModelProfile {
   supports: { streaming: boolean; tools: boolean; structuredOutput: boolean; vision: boolean };
   tier: "fast" | "balanced" | "reasoning";
   free: boolean;
+  /** False for diagnostics that may only be selected by their explicit model ID. */
+  automaticRouting?: boolean;
 }
 
 export interface RouteSelection {

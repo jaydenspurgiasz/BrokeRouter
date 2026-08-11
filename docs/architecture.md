@@ -15,3 +15,16 @@ For each request the gateway authenticates and authorizes the caller, filters mo
 When a workflow ID is present, its dedicated Workflow Coordinator replaces untrusted routing hints with durable remaining calls, tokens, concurrency, deadline, quality tier, and provider affinity. It atomically leases a workflow call only after provider capacity is reserved. Stream completion or cancellation reconciles the provider reservation, workflow lease, and routing outcome exactly once. Durable alarms fail missed deadlines and feed that outcome into learning even without a polling client. Unrelated workflows never contend on one global Durable Object.
 
 Environment-sharded Routing State stores metadata-only decisions and outcomes, hierarchical provider statistics, and policy control. Baseline and shadow modes are deterministic. Adaptive mode uses bounded epsilon-greedy exploration only among gate-approved candidates and logs exact propensities for offline evaluation.
+
+## Server and distributed-systems concerns
+
+BrokeRouter is intentionally more than an API wrapper. Its server-side engineering surface includes:
+
+- **Protocol boundary:** one authenticated OpenAI-compatible HTTP/SSE API normalizes heterogeneous upstreams.
+- **Admission and backpressure:** strongly consistent request/token buckets, concurrency leases, predictive retry times, bounded inline waiting, durable deferred work, and explicit `429`/`503` behavior.
+- **State ownership:** credential, caller, workflow, queue, and environment state have different Durable Object shard keys so correctness-critical updates serialize without forcing unrelated workflows through one lock.
+- **Failure recovery:** reservation TTLs recover abandoned calls, upstream failures open persisted cooldowns, stream cancellation reconciles exactly once, alarms advance jobs and deadlines without a client connection, and policy rollback is independent of deployment.
+- **Security:** Cloudflare Access authenticates the transport; hashed, scoped, independently revocable caller credentials authenticate the application; provider secrets remain server-side; Service Bindings keep Cloudflare-to-Cloudflare traffic off the public path.
+- **Operations:** staging and production isolate secrets and state, migrations are versioned, CI performs type/tests/bundle checks, deployment is approval-gated, and local/deployed benchmarks publish percentiles, saturation curves, errors, provider distribution, colo distribution, and decision/outcome integrity.
+
+That framing is the project's strongest systems story: a multi-tenant-style control plane built for one owner today, with explicit consistency boundaries, overload behavior, observability, safe rollout, and horizontal-sharding seams.

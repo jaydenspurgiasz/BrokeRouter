@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { selectRoute, selectRoutes } from "../src/core/route";
-import { RouterError, type GenerationRequest } from "../src/core/types";
+import { RouterError, type GenerationRequest, type ModelProfile } from "../src/core/types";
 
 const baseRequest: GenerationRequest = {
   messages: [{ role: "user", content: "Explain durable state in one sentence." }],
@@ -35,5 +35,18 @@ describe("selectRoute", () => {
     expect(routes.length).toBeGreaterThan(1);
     expect(routes[0].model.id).toBe("free/default");
     expect(routes[0].reservedTokens).toBeGreaterThan(routes[0].estimatedInputTokens);
+  });
+
+  it("excludes explicit-only diagnostic models from automatic routing", () => {
+    const diagnostic: ModelProfile = {
+      id: "benchmark/echo", provider: "benchmark", upstreamModel: "echo",
+      contextWindow: 128_000, maxOutputTokens: 1_024,
+      supports: { streaming: true, tools: false, structuredOutput: true, vision: false },
+      tier: "fast", free: true, automaticRouting: false,
+    };
+    expect(selectRoutes(baseRequest, [diagnostic, ...selectRoutes(baseRequest).map((route) => route.model)]))
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ model: diagnostic })]));
+    expect(selectRoute({ ...baseRequest, model: "benchmark/echo" }, [diagnostic]).model.id)
+      .toBe("benchmark/echo");
   });
 });

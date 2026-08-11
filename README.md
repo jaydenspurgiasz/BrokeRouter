@@ -187,6 +187,11 @@ decision/outcome telemetry integrity. It writes ignored JSON and Markdown report
 `benchmarks/results/`. See `benchmarks/README.md` for methodology, load overrides, and the
 boundary between defensible local gateway metrics and real-provider end-to-end latency.
 
+After staging is deployed, `npm run benchmark:live` measures the real Cloudflare edge, Access,
+Worker, Durable Objects, SQLite, policy, streaming, and telemetry path without consuming LLM quota.
+See `benchmarks/LIVE.md`. An optional bounded real-provider sample is enabled explicitly with
+`BROKE_LIVE_REAL_REQUESTS`.
+
 ## Current model aliases
 
 - `free/default` — text-oriented NVIDIA default.

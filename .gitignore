@@ -1,6 +1,8 @@
 node_modules/
 .wrangler/
 dist/
-.dev.vars
+.dev.vars*
+.env*
+.secrets.*
 coverage/
 benchmarks/results/

@@ -7,6 +7,8 @@ import type { WorkflowCoordinator } from "./adapters/cloudflare/workflow-coordin
 export interface Env {
   NVIDIA_API_KEY: string;
   NVIDIA_ENABLED?: string;
+  /** Enables an explicit, non-automatic deterministic model for deployed server benchmarks. */
+  BENCHMARK_PROVIDER_ENABLED?: string;
   /** Preferred multi-caller registry. Store as an encrypted Worker secret. */
   CALLER_CREDENTIALS_JSON?: string;
   /** Transitional single-key authentication for local development only. */

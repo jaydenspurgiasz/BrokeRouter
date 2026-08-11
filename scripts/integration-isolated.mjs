@@ -6,13 +6,19 @@ import { createHash } from "node:crypto";
 
 const rateFallback = process.argv.includes("--rate-fallback");
 const callerLimit = process.argv.includes("--caller-limit");
-const port = rateFallback ? 8791 : callerLimit ? 8793 : 8792;
+const liveBenchmark = process.argv.includes("--live-benchmark");
+const port = rateFallback ? 8791 : callerLimit ? 8793 : liveBenchmark ? 8795 : 8792;
 const baseUrl = `http://127.0.0.1:${port}`;
 const stateDir = await mkdtemp(join(tmpdir(), "broke-router-integration-"));
 const argumentsList = [
-  "node_modules/wrangler/bin/wrangler.js", "dev", "--local", "--port", String(port),
+  "node_modules/wrangler/bin/wrangler.js", "dev", ...(liveBenchmark ? ["--env", "staging"] : []),
+  "--local", "--port", String(port),
   "--persist-to", stateDir, "--show-interactive-dev-session=false",
 ];
+if (liveBenchmark) argumentsList.push(
+  "--var", "NVIDIA_ENABLED:false",
+  "--var", "ROUTER_API_KEY:local-test-key",
+);
 if (rateFallback) argumentsList.push(
   "--var", "NVIDIA_REQUESTS_PER_WINDOW:1",
   "--var", "NVIDIA_REQUEST_WINDOW_MS:60000",
@@ -61,11 +67,18 @@ async function waitForHealth() {
 
 function runSmokeTest() {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["scripts/integration-smoke.mjs"], {
+    const child = spawn(process.execPath, [liveBenchmark ? "scripts/benchmark-live.mjs" : "scripts/integration-smoke.mjs"], {
       cwd: process.cwd(), stdio: "inherit",
       env: {
         ...process.env,
         BROKE_ROUTER_URL: baseUrl,
+        ...(liveBenchmark ? {
+          BROKE_ROUTER_API_KEY: "local-test-key",
+          BROKE_LIVE_REQUESTS: "5",
+          BROKE_LIVE_REPEATS: "1",
+          BROKE_LIVE_CONCURRENCY: "1,2",
+          BROKE_LIVE_REAL_REQUESTS: "0",
+        } : {}),
         BROKE_ROUTER_EXPECT_RATE_FALLBACK: rateFallback ? "1" : "0",
         BROKE_ROUTER_EXPECT_CALLER_LIMIT: callerLimit ? "1" : "0",
         ...(callerLimit ? { BROKE_ROUTER_API_KEY: `brk_rate-client.${callerSecret}` } : {}),

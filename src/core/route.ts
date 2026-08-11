@@ -32,6 +32,7 @@ export function selectRoutes(request: GenerationRequest, catalog: ModelProfile[]
 
   const candidates = catalog.filter((candidate) => {
     if (!candidate.free && !request.route?.allowPaid) return false;
+    if (requestedModel === "free/default" && candidate.automaticRouting === false) return false;
     if (requestedModel !== "free/default" && requestedModel !== candidate.id) return false;
     if (desiredTier && candidate.tier !== desiredTier) return false;
     if (request.stream && !candidate.supports.streaming) return false;

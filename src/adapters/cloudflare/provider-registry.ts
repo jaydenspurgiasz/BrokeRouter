@@ -3,6 +3,7 @@ import { NVIDIA_MODELS } from "../../core/models";
 import type { ProviderRateLimitSettings } from "../../core/types";
 import { configuredOpenAiCompatibleProviders, type RegisteredProvider } from "../../providers/openai-compatible";
 import { invokeNvidia } from "../../providers/nvidia";
+import { benchmarkProvider } from "../../providers/benchmark";
 
 export function registeredProviders(env: Env): RegisteredProvider[] {
   const nvidiaLimits = quotaSettings(env);
@@ -14,11 +15,12 @@ export function registeredProviders(env: Env): RegisteredProvider[] {
     invoke: (request, model) => invokeNvidia(request, model, env.NVIDIA_API_KEY),
   };
   const builtIns = env.NVIDIA_ENABLED === "false" ? [] : [nvidia];
+  const diagnostics = env.BENCHMARK_PROVIDER_ENABLED === "true" ? [benchmarkProvider()] : [];
   return [...builtIns, ...configuredOpenAiCompatibleProviders(
     env.ADDITIONAL_OPENAI_COMPATIBLE_PROVIDERS_JSON,
     env as unknown as Record<string, unknown>,
     nvidiaLimits,
-  )];
+  ), ...diagnostics];
 }
 
 export function quotaSettings(env: Env): ProviderRateLimitSettings {

@@ -1,15 +1,81 @@
-# Staging and production deployment
+# Cloudflare deployment runbook
 
-The repository defines two isolated Workers:
+This runbook deploys two isolated services:
 
-- Production: `broke-router` using the top-level Wrangler environment.
-- Staging: `broke-router-staging` using `--env staging`.
+- Staging: `broke-router-staging`, with the deterministic `benchmark/echo` model enabled.
+- Production: `broke-router`, with all diagnostic providers disabled.
 
-Durable Object bindings and variables are repeated deliberately because Wrangler environment bindings are non-inheritable. The two Workers therefore have separate quota, workflow, queue, event, and learned-policy state.
+Each service receives separate secrets and separate SQLite-backed Durable Object state for quotas,
+jobs, workflows, policy events, and learned statistics.
 
-## One-time secrets
+## 1. Prerequisites
 
-Set each secret independently for staging and production:
+You need Node 22+, a Cloudflare account, and an active domain in Cloudflare DNS. Custom Domains
+require a zone you own. From the repository:
+
+```powershell
+cd C:\Users\spurg\Documents\Projects\BrokeRouter
+npm ci
+npx wrangler login
+npx wrangler whoami
+npm run typecheck
+npm test
+npx wrangler deploy --env staging --dry-run
+npx wrangler deploy --env= --dry-run
+```
+
+The Workers Free plan currently includes 100,000 requests/day and 10 ms CPU per HTTP invocation.
+SQLite-backed Durable Objects are available on Free; their daily storage allowances are separate.
+
+## 2. Put Custom Domains in source control
+
+Choose unused hostnames such as `router-staging.example.com` and `router.example.com`. They must
+not already have CNAME records. Add the production route at the top level of `wrangler.jsonc`:
+
+```jsonc
+"routes": [{ "pattern": "router.example.com", "custom_domain": true }]
+```
+
+Add the staging route inside `env.staging`:
+
+```jsonc
+"routes": [{ "pattern": "router-staging.example.com", "custom_domain": true }]
+```
+
+Keep `workers_dev: false`. Wrangler treats its configuration as the source of truth and will ask
+Cloudflare to create DNS records and certificates when it deploys.
+
+## 3. Generate independently revocable caller keys
+
+Generate at least one staging operator, production operator, and production agent credential:
+
+```powershell
+npm run auth:key -- staging-operator --environment staging --admin
+npm run auth:key -- local-laptop --environment production --admin
+npm run auth:key -- coding-agent --environment production
+```
+
+Each command prints a caller token once and a registry entry containing only its SHA-256 hash.
+Save the tokens in Windows Credential Manager or another secret store. Merge the staging entries
+into one JSON object and the production entries into a different object. Never store the cleartext
+tokens in either registry and never commit either value.
+
+`--admin` grants `stats:read` and `policy:write`. Ordinary agent credentials deliberately cannot
+change policy. Add caller-level request, token, daily, and concurrency limits to each registry entry
+before deployment if desired; see `docs/security.md`.
+
+## 4. Create the Workers and upload secrets
+
+The first staging deploy creates the Worker, Durable Object namespaces, migrations, and Custom
+Domain. The first production deploy does the same with isolated state:
+
+```powershell
+npx wrangler deploy --env staging
+npx wrangler deploy --env=
+```
+
+Upload secrets independently. `wrangler secret put` reads the value interactively and creates a
+new deployed Worker version; the value is encrypted and is not written to `wrangler.jsonc`.
 
 ```powershell
 npx wrangler secret put NVIDIA_API_KEY --env staging
@@ -23,52 +89,141 @@ npx wrangler secret put ADDITIONAL_OPENAI_COMPATIBLE_PROVIDERS_JSON
 npx wrangler secret put CALLER_CREDENTIALS_JSON
 ```
 
-Provider registry JSON is sensitive because it names secret bindings and internal policy configuration, so this project stores it as a secret too.
+Use the same OpenAI-compatible provider JSON that passed local tests. A current Gemini example is:
 
-## Private local access
+```json
+[
+  {
+    "id": "gemini",
+    "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    "apiKeyBinding": "GEMINI_API_KEY",
+    "credentialScope": "primary",
+    "rateLimits": {
+      "requests": { "limit": 5, "windowMs": 60000 },
+      "tokens": { "limit": 100000, "windowMs": 60000 },
+      "maxConcurrent": 1
+    },
+    "models": [
+      {
+        "id": "free/default",
+        "upstreamModel": "gemini-3.6-flash",
+        "contextWindow": 1000000,
+        "maxOutputTokens": 64000,
+        "supports": { "streaming": true, "tools": true, "structuredOutput": true, "vision": true },
+        "tier": "balanced",
+        "free": true
+      }
+    ]
+  }
+]
+```
 
-Keep `workers.dev` disabled. Choose hostnames such as `router-staging.example.com` and `router.example.com`, attach each to its Worker, and create a Cloudflare Access self-hosted application for each hostname. Use a Service Auth policy with a distinct service token for the local laptop.
+The numeric limits above are conservative examples, not authoritative account quotas. Copy your
+active RPM/TPM/RPD values from Google AI Studio and encode the known RPM/TPM limits here. Gemini
+quotas are project-scoped and can change. The router learns authoritative 429 cooldowns at runtime.
 
-The laptop sends the Access token headers plus its BrokeRouter credential. Cloudflare-hosted agents continue using Service Bindings and only their BrokeRouter credential.
+After changing secrets, deploy once more so code, variables, and migrations are known to be current:
 
-Official references:
+```powershell
+npx wrangler deploy --env staging
+npx wrangler deploy --env=
+```
 
-- [Wrangler environments](https://developers.cloudflare.com/workers/wrangler/environments/)
-- [Durable Objects and environments](https://developers.cloudflare.com/durable-objects/reference/environments/)
-- [Cloudflare Access service tokens](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/)
+## 5. Protect the public hostnames with Cloudflare Access
 
-## CI/CD
+In Zero Trust, create a self-hosted Access application for each exact hostname:
 
-Pull requests and `main` pushes run typechecking, unit tests, and production/staging Wrangler dry-run builds. Live provider tests are intentionally excluded because they consume quota and require secrets.
+1. Go to **Zero Trust > Access controls > Applications**.
+2. Add a **Self-hosted** application for `router-staging.example.com`.
+3. Add a **Service Auth** policy. Do not use an Allow policy for machine-only access.
+4. Repeat for `router.example.com`.
+5. Go to **Access controls > Service credentials > Service Tokens**.
+6. Create separate tokens for the laptop's staging and production access.
+7. Copy each Client Secret immediately; Cloudflare displays it only once.
+8. Add the matching service token to the corresponding application's Service Auth policy.
 
-The manual Deploy workflow targets a protected GitHub environment named `staging` or `production`. Add these GitHub environment secrets:
+Every laptop request then supplies two independent layers:
 
-- `CLOUDFLARE_API_TOKEN`
-- `CLOUDFLARE_ACCOUNT_ID`
+```text
+CF-Access-Client-Id: <transport identity>
+CF-Access-Client-Secret: <transport secret>
+Authorization: Bearer brk_<caller-id>.<caller-secret>
+```
 
-Require reviewer approval for the production GitHub environment. Deploy staging first, run the isolated smoke suite against its Access-protected URL, then approve production.
+Access rejects unauthorized Internet traffic before the Worker runs. BrokeRouter's application key
+then identifies the exact agent, scopes endpoints, applies caller quotas, and supports independent
+revocation. Cloudflare-hosted agents should use a Service Binding instead of the public hostname;
+they still send their BrokeRouter caller credential.
 
-## Policy rollout
+## 6. Verify staging before production
 
-Both environments default to `shadow`. Inspect the learned summary:
+Set secrets only for the current PowerShell session:
 
-```http
+```powershell
+$env:BROKE_ROUTER_URL="https://router-staging.example.com"
+$env:BROKE_ROUTER_API_KEY="brk_staging-operator.REPLACE_ME"
+$env:CF_ACCESS_CLIENT_ID="REPLACE_ME.access"
+$env:CF_ACCESS_CLIENT_SECRET="REPLACE_ME"
+```
+
+Verify transport, application authentication, and model registration:
+
+```powershell
+curl.exe -sS "$env:BROKE_ROUTER_URL/health" `
+  -H "CF-Access-Client-Id: $env:CF_ACCESS_CLIENT_ID" `
+  -H "CF-Access-Client-Secret: $env:CF_ACCESS_CLIENT_SECRET"
+
+curl.exe -sS "$env:BROKE_ROUTER_URL/v1/models" `
+  -H "CF-Access-Client-Id: $env:CF_ACCESS_CLIENT_ID" `
+  -H "CF-Access-Client-Secret: $env:CF_ACCESS_CLIENT_SECRET" `
+  -H "Authorization: Bearer $env:BROKE_ROUTER_API_KEY"
+```
+
+Staging must list `benchmark/echo`; production must not. Then run the deployed server benchmark:
+
+```powershell
+npm run benchmark:live
+```
+
+To add a deliberately small real-provider sample after the quota-free run passes:
+
+```powershell
+$env:BROKE_LIVE_REAL_REQUESTS="6"
+npm run benchmark:live
+```
+
+Generated JSON and Markdown remain local under `benchmarks/results/` and are gitignored. See
+`benchmarks/LIVE.md` for methodology and claim boundaries.
+
+## 7. Deploy through GitHub after manual verification
+
+The repository's manual `Deploy` workflow targets protected GitHub environments named `staging`
+and `production`. In each GitHub environment, configure:
+
+- `CLOUDFLARE_API_TOKEN`: create the **Edit Cloudflare Workers** token, then restrict it to the one account and required zone.
+- `CLOUDFLARE_ACCOUNT_ID`.
+
+Require a reviewer for the production environment. Deploy staging, run smoke and live benchmarks,
+then approve production. Secrets already stored on the Worker are preserved across normal deploys.
+
+## 8. Operate and roll back
+
+Use the Cloudflare Worker dashboard for request counts, invocation status, subrequests, CPU, and
+wall time. Use `npx wrangler tail broke-router-staging` while diagnosing staging. Application-level
+metadata is available through:
+
+```text
 GET /v1/routing/stats
 GET /v1/routing/policy
 GET /v1/routing/evaluation
 ```
 
-After sufficient shadow evidence, activate adaptive routing:
-
-```http
-PUT /v1/routing/policy
-Content-Type: application/json
-
-{"mode":"adaptive","explorationRate":0.05,"minObservations":30}
-```
-
-Rollback requires no deployment:
+Keep the policy in `shadow` until the effective sample size and workflow outcomes are credible.
+Policy rollback does not require a deployment:
 
 ```json
 {"mode":"baseline","explorationRate":0,"minObservations":30}
 ```
+
+Production code rollback should redeploy a known Git commit. Rotate one caller by adding its
+replacement hash to `CALLER_CREDENTIALS_JSON`, updating that caller, and then removing the old hash.
