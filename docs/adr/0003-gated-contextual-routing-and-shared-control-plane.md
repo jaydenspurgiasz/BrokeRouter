@@ -1,5 +1,9 @@
 # ADR 0003: Gated contextual routing and a shared control plane
 
+> Personal-MVP update: the single authoritative Worker initially uses its authenticated
+> `workers.dev` URL. The Access-protected custom hostname described below is retained as the
+> defense-in-depth target once a custom domain is worthwhile.
+
 - Status: accepted
 - Date: 2026-08-09
 

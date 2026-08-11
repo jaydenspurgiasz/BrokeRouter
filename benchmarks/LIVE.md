@@ -8,12 +8,13 @@ LLM request. The model is excluded from `free/default` and requires an authentic
 ## Run
 
 ```powershell
-$env:BROKE_ROUTER_URL="https://router.example.com"
+$env:BROKE_ROUTER_URL="https://broke-router.YOUR-SUBDOMAIN.workers.dev"
 $env:BROKE_ROUTER_API_KEY="brk_local-laptop.REPLACE_ME"
-$env:CF_ACCESS_CLIENT_ID="REPLACE_ME.access"
-$env:CF_ACCESS_CLIENT_SECRET="REPLACE_ME"
 npm run benchmark:live
 ```
+
+If a custom domain protected by Cloudflare Access is added later, also set
+`CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`; the harness includes them automatically.
 
 Defaults:
 

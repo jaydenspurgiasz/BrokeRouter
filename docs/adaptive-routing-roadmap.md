@@ -38,7 +38,7 @@
 ## Operations remaining for an account owner
 
 - [ ] Set the personal deployment's provider/caller secrets in Cloudflare.
-- [ ] Choose the personal deployment's custom hostname.
+- [x] Use the account's `workers.dev` hostname for the personal MVP; custom domain is optional later.
 - [ ] Create Cloudflare Access applications and service-auth policies.
 - [ ] Add the custom-domain routes after the hostnames are known.
 - [ ] Add GitHub Actions secrets and run the first manual deployment.

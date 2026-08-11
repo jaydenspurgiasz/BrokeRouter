@@ -1,13 +1,13 @@
 # Private access model
 
-BrokeRouter supports two private transports into one authoritative Worker:
+BrokeRouter supports two authenticated transports into one authoritative Worker:
 
 ```text
 Cloudflare agent --Service Binding---------------------> BrokeRouter
-Local agent ------Access-protected custom hostname----> BrokeRouter
+Local agent ------workers.dev + caller credential-----> BrokeRouter
 ```
 
-Keep `workers_dev` disabled. The external route must be a custom hostname protected by a Cloudflare Access service-token policy. Access blocks unauthorized Internet traffic before the Worker runs. Every transport must additionally provide an independently revocable BrokeRouter caller credential; this identifies the application and grants endpoint scopes.
+The personal MVP exposes a `workers.dev` hostname and requires an independently revocable BrokeRouter caller credential on every sensitive endpoint. This identifies the application, grants endpoint scopes, and prevents unauthorized provider use. A custom hostname protected by a Cloudflare Access service-token policy can later reject unauthorized traffic before the Worker runs.
 
 ## Caller credentials
 
@@ -44,7 +44,7 @@ Caller limits use the same strongly consistent request/token buckets, daily safe
 }
 ```
 
-`ROUTER_API_KEY` remains a local migration fallback only when no caller registry is configured. If `CALLER_CREDENTIALS_JSON` exists, the legacy key is never considered. Production must use the caller registry.
+`ROUTER_API_KEY` remains a local migration fallback only when no caller registry is configured. If `CALLER_CREDENTIALS_JSON` exists, the legacy key is never considered. The deployed Worker must use the caller registry.
 
 ## Cloudflare agent
 
@@ -73,15 +73,13 @@ await env.LLM_GATEWAY.fetch("https://broke-router/v1/chat/completions", {
 
 ## Local agent
 
-Create a Cloudflare Access service token and a service-auth policy for the custom router hostname. A local request sends both transport credentials and its BrokeRouter caller token:
+For the personal MVP, call the `workers.dev` URL with the laptop's BrokeRouter caller token:
 
 ```http
-CF-Access-Client-Id: <access-service-token-id>
-CF-Access-Client-Secret: <access-service-token-secret>
 Authorization: Bearer brk_local-laptop.<caller-secret>
 ```
 
-Store these values in the operating system's credential store or injected environment variables. Provider API keys stay exclusively in BrokeRouter.
+Store the token in the operating system's credential store or injected environment variables. Provider API keys stay exclusively in BrokeRouter. If Cloudflare Access is added later, also send its Client ID and Client Secret; the BrokeRouter token remains required.
 
 ## Rotation and revocation
 

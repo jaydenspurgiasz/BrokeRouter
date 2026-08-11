@@ -2,7 +2,7 @@
 
 Free-tier-aware LLM routing for agents that should not accidentally spend money. The first deployment target is Cloudflare Workers and the first provider is NVIDIA's API Catalog, but the routing core deliberately uses Web APIs and provider/state ports rather than Cloudflare or NVIDIA concepts.
 
-Production access is private: Cloudflare agents use Service Bindings, while local agents use an Access-protected custom hostname. Both use independently revocable caller credentials. BrokeRouter disables `workers.dev`. See [the security model](docs/security.md) and [adaptive routing roadmap](docs/adaptive-routing-roadmap.md).
+The personal deployment uses a `workers.dev` endpoint protected by independently revocable caller credentials; Cloudflare-hosted agents can use Service Bindings. A custom hostname and Cloudflare Access remain optional defense-in-depth upgrades. See [the security model](docs/security.md) and [adaptive routing roadmap](docs/adaptive-routing-roadmap.md).
 
 ## What exists
 
