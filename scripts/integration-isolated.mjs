@@ -11,12 +11,12 @@ const port = rateFallback ? 8791 : callerLimit ? 8793 : liveBenchmark ? 8795 : 8
 const baseUrl = `http://127.0.0.1:${port}`;
 const stateDir = await mkdtemp(join(tmpdir(), "broke-router-integration-"));
 const argumentsList = [
-  "node_modules/wrangler/bin/wrangler.js", "dev", ...(liveBenchmark ? ["--env", "staging"] : []),
-  "--local", "--port", String(port),
+  "node_modules/wrangler/bin/wrangler.js", "dev", "--local", "--port", String(port),
   "--persist-to", stateDir, "--show-interactive-dev-session=false",
 ];
 if (liveBenchmark) argumentsList.push(
   "--var", "NVIDIA_ENABLED:false",
+  "--var", "BENCHMARK_PROVIDER_ENABLED:true",
   "--var", "ROUTER_API_KEY:local-test-key",
 );
 if (rateFallback) argumentsList.push(

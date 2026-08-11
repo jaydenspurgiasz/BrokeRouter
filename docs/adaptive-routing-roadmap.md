@@ -37,10 +37,10 @@
 
 ## Operations remaining for an account owner
 
-- [ ] Set production and staging provider/caller secrets in Cloudflare.
-- [ ] Choose the production and staging custom hostnames.
+- [ ] Set the personal deployment's provider/caller secrets in Cloudflare.
+- [ ] Choose the personal deployment's custom hostname.
 - [ ] Create Cloudflare Access applications and service-auth policies.
 - [ ] Add the custom-domain routes after the hostnames are known.
-- [ ] Add GitHub environment secrets and approve the first staging deployment.
+- [ ] Add GitHub Actions secrets and run the first manual deployment.
 
 These are account-specific deployment actions, not unfinished application code.

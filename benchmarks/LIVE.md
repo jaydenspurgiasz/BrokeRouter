@@ -1,15 +1,15 @@
 # Deployed Cloudflare benchmark
 
-The live suite measures BrokeRouter as a server, not only as an LLM client. Staging exposes an
+The live suite measures BrokeRouter as a server, not only as an LLM client. The private deployment exposes an
 explicit `benchmark/echo` model that executes the real authentication, admission-control, policy,
 Durable Object RPC, SQLite, telemetry, streaming, and response-normalization path without making an
-LLM request. The model is excluded from `free/default`, and production disables the provider.
+LLM request. The model is excluded from `free/default` and requires an authenticated explicit request.
 
 ## Run
 
 ```powershell
-$env:BROKE_ROUTER_URL="https://router-staging.example.com"
-$env:BROKE_ROUTER_API_KEY="brk_staging-operator.REPLACE_ME"
+$env:BROKE_ROUTER_URL="https://router.example.com"
+$env:BROKE_ROUTER_API_KEY="brk_local-laptop.REPLACE_ME"
 $env:CF_ACCESS_CLIENT_ID="REPLACE_ME.access"
 $env:CF_ACCESS_CLIENT_SECRET="REPLACE_ME"
 npm run benchmark:live

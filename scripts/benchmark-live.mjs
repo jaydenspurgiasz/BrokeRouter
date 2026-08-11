@@ -29,7 +29,7 @@ console.log(`${requestsPerRun} requests x ${repeats} repeats at concurrency ${co
 
 const models = await getJson("/v1/models");
 assert.ok(models.data?.some((model) => model.id === "benchmark/echo"),
-  "benchmark/echo is unavailable. Deploy staging with BENCHMARK_PROVIDER_ENABLED=true.");
+  "benchmark/echo is unavailable. Deploy with BENCHMARK_PROVIDER_ENABLED=true.");
 const policy = await getJson("/v1/routing/policy");
 const statsBefore = await getJson("/v1/routing/stats");
 const firstHealth = await single(`${baseUrl}/health`, { headers: accessHeaders });

@@ -334,7 +334,7 @@ async function setPolicy(mode) {
 
 async function bundleMetrics() {
   const result = spawnSync(process.execPath, [
-    "node_modules/wrangler/bin/wrangler.js", "deploy", "--env=", "--dry-run", "--outdir", bundleDir,
+    "node_modules/wrangler/bin/wrangler.js", "deploy", "--dry-run", "--outdir", bundleDir,
   ], { cwd: process.cwd(), encoding: "utf8", windowsHide: true });
   if (result.status !== 0) throw new Error(`Wrangler bundle dry run failed:\n${result.stderr || result.stdout}`);
   const files = await listFiles(bundleDir);

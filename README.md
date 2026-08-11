@@ -93,7 +93,7 @@ const response = await env.LLM_GATEWAY.fetch("https://broke-router/v1/chat/compl
 | Variable | Meaning |
 | --- | --- |
 | `NVIDIA_API_KEY` | Required Worker secret. Never expose to callers. |
-| `CALLER_CREDENTIALS_JSON` | Required production secret containing hashed per-caller credentials, environments, and scopes. |
+| `CALLER_CREDENTIALS_JSON` | Required deployed secret containing hashed per-caller credentials, environments, and scopes. |
 | `ROUTER_API_KEY` | Transitional single-key fallback for local development only; ignored when the caller registry exists. |
 | `NVIDIA_DAILY_SAFETY_BUDGET_TOKENS` | Local hard ceiling for a shared NVIDIA credential. `0` means no known daily ceiling is enforced; 429s still create cooldowns. |
 | `NVIDIA_COOLDOWN_MS` | Conservative fallback cooldown when the upstream does not provide `Retry-After`. |
@@ -187,7 +187,7 @@ decision/outcome telemetry integrity. It writes ignored JSON and Markdown report
 `benchmarks/results/`. See `benchmarks/README.md` for methodology, load overrides, and the
 boundary between defensible local gateway metrics and real-provider end-to-end latency.
 
-After staging is deployed, `npm run benchmark:live` measures the real Cloudflare edge, Access,
+After the private Worker is deployed, `npm run benchmark:live` measures the real Cloudflare edge, Access,
 Worker, Durable Objects, SQLite, policy, streaming, and telemetry path without consuming LLM quota.
 See `benchmarks/LIVE.md`. An optional bounded real-provider sample is enabled explicitly with
 `BROKE_LIVE_REAL_REQUESTS`.

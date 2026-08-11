@@ -85,4 +85,4 @@ Store these values in the operating system's credential store or injected enviro
 
 ## Rotation and revocation
 
-Generate a replacement credential, update the encrypted registry, deploy it, update the one caller, and remove the old entry. Disabling or deleting one record does not affect other agents. Use separate registries, Access applications, provider secrets, and Durable Object namespaces for staging and production.
+Generate a replacement credential, update the encrypted registry, deploy it, update the one caller, and remove the old entry. Disabling or deleting one record does not affect other agents. If a second deployment environment is introduced later, give it separate registries, Access applications, provider secrets, and Durable Object namespaces.

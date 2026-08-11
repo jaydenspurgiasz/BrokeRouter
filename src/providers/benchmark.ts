@@ -13,11 +13,11 @@ const MODEL: ModelProfile = {
   automaticRouting: false,
 };
 
-/** Staging-only deterministic provider for measuring the deployed server path without LLM quota. */
+/** Explicit-only deterministic provider for measuring the deployed server path without LLM quota. */
 export function benchmarkProvider(): RegisteredProvider {
   return {
     id: "benchmark",
-    credentialScope: "staging-diagnostic",
+    credentialScope: "personal-diagnostic",
     models: [MODEL],
     rateLimits: {
       dailySafetyBudgetTokens: 0,
