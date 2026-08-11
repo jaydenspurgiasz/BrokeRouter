@@ -18,9 +18,12 @@ const scopes = ["models:read", "chat:write", "jobs:write", "jobs:read", "workflo
 if (process.argv.includes("--admin")) scopes.push("stats:read", "policy:write");
 if (process.argv.includes("--paid")) scopes.push("providers:paid");
 console.log(`Caller token (show once): brk_${id}.${secret}`);
-console.log("Registry entry:");
-console.log(JSON.stringify({ [id]: {
+const registry = { [id]: {
   keyHash,
   environment,
   scopes,
-} }, null, 2));
+} };
+console.log("Registry entry:");
+console.log(JSON.stringify(registry, null, 2));
+console.log("Registry secret (paste this one line into Wrangler):");
+console.log(JSON.stringify(registry));
