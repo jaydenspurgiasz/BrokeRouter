@@ -64,14 +64,13 @@ tokens in either registry and never commit either value.
 change policy. Add caller-level request, token, daily, and concurrency limits to each registry entry
 before deployment if desired; see `docs/security.md`.
 
-## 4. Create the Workers and upload secrets
+## 4. Create staging and upload staging secrets
 
 The first staging deploy creates the Worker, Durable Object namespaces, migrations, and Custom
-Domain. The first production deploy does the same with isolated state:
+Domain. Do not create production yet:
 
 ```powershell
 npx wrangler deploy --env staging
-npx wrangler deploy --env=
 ```
 
 Upload secrets independently. `wrangler secret put` reads the value interactively and creates a
@@ -82,11 +81,6 @@ npx wrangler secret put NVIDIA_API_KEY --env staging
 npx wrangler secret put GEMINI_API_KEY --env staging
 npx wrangler secret put ADDITIONAL_OPENAI_COMPATIBLE_PROVIDERS_JSON --env staging
 npx wrangler secret put CALLER_CREDENTIALS_JSON --env staging
-
-npx wrangler secret put NVIDIA_API_KEY
-npx wrangler secret put GEMINI_API_KEY
-npx wrangler secret put ADDITIONAL_OPENAI_COMPATIBLE_PROVIDERS_JSON
-npx wrangler secret put CALLER_CREDENTIALS_JSON
 ```
 
 Use the same OpenAI-compatible provider JSON that passed local tests. A current Gemini example is:
@@ -122,11 +116,10 @@ The numeric limits above are conservative examples, not authoritative account qu
 active RPM/TPM/RPD values from Google AI Studio and encode the known RPM/TPM limits here. Gemini
 quotas are project-scoped and can change. The router learns authoritative 429 cooldowns at runtime.
 
-After changing secrets, deploy once more so code, variables, and migrations are known to be current:
+After changing staging secrets, deploy once more so code, variables, and migrations are known to be current:
 
 ```powershell
 npx wrangler deploy --env staging
-npx wrangler deploy --env=
 ```
 
 ## 5. Protect the public hostnames with Cloudflare Access
@@ -136,11 +129,10 @@ In Zero Trust, create a self-hosted Access application for each exact hostname:
 1. Go to **Zero Trust > Access controls > Applications**.
 2. Add a **Self-hosted** application for `router-staging.example.com`.
 3. Add a **Service Auth** policy. Do not use an Allow policy for machine-only access.
-4. Repeat for `router.example.com`.
-5. Go to **Access controls > Service credentials > Service Tokens**.
-6. Create separate tokens for the laptop's staging and production access.
-7. Copy each Client Secret immediately; Cloudflare displays it only once.
-8. Add the matching service token to the corresponding application's Service Auth policy.
+4. Go to **Access controls > Service credentials > Service Tokens**.
+5. Create a token for the laptop's staging access.
+6. Copy its Client Secret immediately; Cloudflare displays it only once.
+7. Add that service token to the staging application's Service Auth policy.
 
 Every laptop request then supplies two independent layers:
 
@@ -194,6 +186,21 @@ npm run benchmark:live
 
 Generated JSON and Markdown remain local under `benchmarks/results/` and are gitignored. See
 `benchmarks/LIVE.md` for methodology and claim boundaries.
+
+Only after staging passes, create production and upload the separately generated production values:
+
+```powershell
+npx wrangler deploy --env=
+npx wrangler secret put NVIDIA_API_KEY
+npx wrangler secret put GEMINI_API_KEY
+npx wrangler secret put ADDITIONAL_OPENAI_COMPATIBLE_PROVIDERS_JSON
+npx wrangler secret put CALLER_CREDENTIALS_JSON
+npx wrangler deploy --env=
+```
+
+Then repeat the Access application, Service Auth policy, and service-token steps for
+`router.example.com`. Verify that production does **not** list `benchmark/echo` before connecting
+an agent through its Service Binding.
 
 ## 7. Deploy through GitHub after manual verification
 
