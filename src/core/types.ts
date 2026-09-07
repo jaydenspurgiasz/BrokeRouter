@@ -29,6 +29,8 @@ export interface GenerationRequest {
     allowPaid?: boolean;
     /** Off by default: reasoning traces are costly and not part of the public response contract. */
     reasoning?: "off" | "on";
+    /** Caller-chosen conversation key used for sticky routing. The raw value is never persisted. */
+    affinityKey?: string;
     /** Optimization context. These hints can affect ranking, never hard safety gates. */
     workflowId?: string;
     workflowType?: "single-turn" | "tool-agent" | "parallel-research" | "coding-agent" | "summarization" | "batch";

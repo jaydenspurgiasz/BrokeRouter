@@ -20,6 +20,19 @@ export const VIRTUAL_MODELS: VirtualModelProfile[] = [{
   tier: "balanced",
   free: true,
   automaticRouting: false,
+}, {
+  id: "free/compression",
+  object: "model",
+  owned_by: "brokerouter",
+  virtual: true,
+  provider: "brokerouter",
+  upstreamModel: "free/compression",
+  contextWindow: 65_536,
+  maxOutputTokens: 4_096,
+  supports: { streaming: false, tools: false, structuredOutput: false, vision: false },
+  tier: "balanced",
+  free: true,
+  automaticRouting: false,
 }];
 
 export function virtualModel(id: string): VirtualModelProfile | undefined {

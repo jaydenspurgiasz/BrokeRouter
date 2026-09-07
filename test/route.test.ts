@@ -80,4 +80,16 @@ describe("selectRoute", () => {
     ]);
     expect(routes.map((route) => route.model.id)).toEqual([capable.id]);
   });
+
+  it("validates bounded session affinity keys", () => {
+    expect(() => selectRoute({ ...baseRequest, route: { affinityKey: "" } })).toThrow(RouterError);
+    expect(() => selectRoute({ ...baseRequest, route: { affinityKey: "x".repeat(257) } })).toThrow(RouterError);
+    expect(() => selectRoute({ ...baseRequest, route: { affinityKey: "hermes-conversation-1" } })).not.toThrow();
+  });
+
+  it("keeps the compression tier non-streaming and tool-free", () => {
+    expect(() => selectRoute({ ...baseRequest, model: "free/compression", stream: true })).toThrow(RouterError);
+    expect(() => selectRoute({ ...baseRequest, model: "free/compression", tools: [{ type: "function", function: { name: "x" } }] }))
+      .toThrow(RouterError);
+  });
 });

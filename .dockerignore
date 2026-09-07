@@ -1,0 +1,9 @@
+.git
+.env*
+!.env.example
+.dev.vars*
+node_modules
+dist
+data
+coverage
+benchmarks/results

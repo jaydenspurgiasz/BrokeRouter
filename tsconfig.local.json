@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "declaration": false,
+    "sourceMap": true
+  },
+  "include": [
+    "src/adapters/node/**/*.ts",
+    "src/adapters/cloudflare/provider-registry.ts",
+    "src/core/**/*.ts",
+    "src/providers/**/*.ts",
+    "src/config.ts"
+  ]
+}

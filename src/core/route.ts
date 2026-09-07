@@ -38,6 +38,12 @@ export function selectRoutes(request: GenerationRequest, catalog: ModelProfile[]
     || !request.messages.every(isChatMessage)) {
     throw new RouterError("invalid_request", "messages must be a non-empty array of chat messages", 400);
   }
+  if (request.route?.affinityKey !== undefined
+    && (typeof request.route.affinityKey !== "string"
+      || request.route.affinityKey.trim().length === 0
+      || request.route.affinityKey.length > 256)) {
+    throw new RouterError("invalid_request", "route.affinityKey must be a non-empty string of at most 256 characters", 400);
+  }
 
   const requestedOutput = Math.max(1, request.max_tokens ?? 1_024);
   const inputTokens = estimateInputTokens(request);
@@ -47,6 +53,9 @@ export function selectRoutes(request: GenerationRequest, catalog: ModelProfile[]
 
   const candidates = catalog.filter((candidate) => {
     if (virtual) {
+      if (request.stream && !virtual.supports.streaming) return false;
+      if (request.tools?.length && !virtual.supports.tools) return false;
+      if (needsVision(request) && !virtual.supports.vision) return false;
       if (!satisfiesVirtualModel(candidate, virtual)) return false;
     } else {
       if (!candidate.free && !request.route?.allowPaid) return false;

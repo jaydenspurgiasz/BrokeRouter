@@ -1,12 +1,20 @@
 # BrokeRouter
 
-Free-tier-aware LLM routing for agents that should not accidentally spend money. The first deployment target is Cloudflare Workers and the first provider is NVIDIA's API Catalog, but the routing core deliberately uses Web APIs and provider/state ports rather than Cloudflare or NVIDIA concepts.
+Free-tier-aware LLM routing for agents that should not accidentally spend money. The primary Hermes
+deployment is a native Node server with persistent SQLite state on the same Oracle VM or private
+Docker network. A Cloudflare Worker adapter remains available as a separate deployment target.
 
-The current deployable runtime is Cloudflare-native. Its routing, quota, workflow, and job state use
-Durable Objects, so an Oracle Cloud VM needs a separate runtime/state adapter; this repository is
-not yet a standalone Oracle/Node server.
+The runtime is always chosen explicitly; the commands never start both:
 
-The personal deployment uses a `workers.dev` endpoint protected by independently revocable caller credentials; Cloudflare-hosted agents can use Service Bindings. A custom hostname and Cloudflare Access remain optional defense-in-depth upgrades. See [the security model](docs/security.md) and [adaptive routing roadmap](docs/adaptive-routing-roadmap.md).
+- `npm run build && npm run start:local` starts Node + SQLite for Oracle/Hermes.
+- `npm run dev` starts the optional local Cloudflare Worker adapter through Wrangler.
+- `npm run deploy` deploys only the Cloudflare Worker.
+
+`GET /health` reports `runtime: "node-sqlite"` on the Oracle/local server. In Docker, configure
+Hermes to use `http://brokerouter:8787/v1`; on a single host without Docker, use
+`http://127.0.0.1:8787/v1`. Do not expose port 8787 publicly.
+
+The optional Worker deployment uses a `workers.dev` endpoint protected by independently revocable caller credentials; Cloudflare-hosted agents can use Service Bindings. See [the security model](docs/security.md) and [adaptive routing roadmap](docs/adaptive-routing-roadmap.md).
 
 ## What exists
 
@@ -70,14 +78,25 @@ It is off by default to protect free-tier output budgets. The router strips reas
 
 ```bash
 npm install
-Copy-Item .env.example .env
-# Put provider account definitions and the local caller key in .env
-npm run dev
+cp .env.example .env
+# Put provider account definitions and the local caller key in the ignored .env
+npm run build
+npm run start:local
 ```
 
-Use either `.env` or the legacy `.dev.vars`, not both; Wrangler gives `.dev.vars` precedence. Provider
-keys are only read in the gateway Worker. An agent deployed as another Worker should call this
-service through a Cloudflare Service Binding, not via the public Internet.
+SQLite is stored at `BROKEROUTER_DATABASE_PATH` and uses WAL mode, atomic admission transactions,
+foreign keys, and a busy timeout. `compose.oracle.yml` runs the service as a non-root user with a
+read-only root filesystem and a persistent `/data` volume on an internal network.
+
+The native server reads `.env` automatically (or `BROKEROUTER_ENV_FILE`) and provider keys remain
+inside its process. The optional Wrangler runtime can instead use `.dev.vars` or Worker secrets.
+An agent deployed as another Worker should call that adapter through a Cloudflare Service Binding.
+
+The native Hermes path supports `/health`, `/v1/models`, and streaming/non-streaming
+`/v1/chat/completions`, including `route.affinityKey`, SQLite quota/cooldown state, and upstream
+failover. The Worker-only workflow/job control-plane endpoints are not silently emulated locally;
+native requests containing `route.workflowId` receive `workflow_unavailable`. Use an affinity key
+per Hermes conversation until the workflow/job stores are ported to the native adapter.
 
 ```ts
 const response = await env.LLM_GATEWAY.fetch("https://broke-router/v1/chat/completions", {

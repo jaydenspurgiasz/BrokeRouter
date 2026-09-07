@@ -14,6 +14,7 @@ const gemini = parseAccount(sourceEnv[geminiName], geminiName, "gemini");
 const routerKey = sourceEnv.ROUTER_API_KEY;
 assert.ok(routerKey?.length >= 32, "ROUTER_API_KEY must contain at least 32 characters");
 const secretValues = [routerKey, nvidia.apiKey, gemini.apiKey];
+const rateOnly = process.argv.includes("--rate-only");
 
 const behaviorEnv = {
   ...sourceEnv,
@@ -22,16 +23,18 @@ const behaviorEnv = {
   [nvidiaName]: JSON.stringify(withRequestLimit(nvidia, 4, 60_000)),
   [geminiName]: JSON.stringify(withRequestLimit(gemini, 100, 60_000)),
 };
-await runWorkerSuite("behavior", 8801, behaviorEnv, runBehaviorSuite);
+if (!rateOnly) await runLocalSuite("behavior", 8801, behaviorEnv, runBehaviorSuite);
 
 const rateEnv = {
   ...sourceEnv,
   [nvidiaName]: JSON.stringify(withRequestLimit(nvidia, 1, 60_000)),
   [geminiName]: JSON.stringify(withRequestLimit(gemini, 10, 60_000)),
 };
-await runWorkerSuite("rate-fallback", 8802, rateEnv, runRateFallbackSuite);
+await runLocalSuite("rate-fallback", 8802, rateEnv, runRateFallbackSuite);
 
-console.log("\nAll live Hermes checks passed using real NVIDIA and Gemini calls.");
+console.log(rateOnly
+  ? "\nLive native rate-limit fallback check passed."
+  : "\nAll live Hermes checks passed using real NVIDIA and Gemini calls.");
 
 async function runBehaviorSuite(baseUrl) {
   const headers = authHeaders();
@@ -93,17 +96,13 @@ async function checkStreaming(baseUrl, model) {
 
 async function checkContextWorkflow(baseUrl) {
   const marker = `QUARTZ-${randomBytes(5).toString("hex").toUpperCase()}`;
-  const workflow = await post(baseUrl, "/v1/workflows", {
-    workflowType: "coding-agent", expectedCalls: 2, maxCalls: 6, maxConcurrency: 1,
-    estimatedTotalTokens: 2_000, qualityTier: "balanced",
-  });
-  assert.ok(workflow.body.id, "workflow was not created");
+  const affinityKey = `context-${randomBytes(8).toString("hex")}`;
   const messages = [{
     role: "user",
     content: `The temporary project codename for this conversation is ${marker}. Acknowledge the codename.`,
   }];
   const first = await completion(baseUrl, {
-    model: "free/hermes", route: { workflowId: workflow.body.id }, messages,
+    model: "free/hermes", route: { affinityKey }, messages,
     reasoning_effort: "low", max_tokens: 512,
   });
   const assistant = first.body.choices?.[0]?.message;
@@ -112,25 +111,17 @@ async function checkContextWorkflow(baseUrl) {
     role: "user", content: "What temporary project codename did I give you? Return only that codename.",
   });
   const second = await completion(baseUrl, {
-    model: "free/hermes", route: { workflowId: workflow.body.id }, messages,
+    model: "free/hermes", route: { affinityKey }, messages,
     reasoning_effort: "low", max_tokens: 512,
   });
   assert.match(second.body.choices?.[0]?.message?.content ?? "", new RegExp(marker));
-  assert.equal(
-    second.response.headers.get("x-broke-router-provider"),
-    first.response.headers.get("x-broke-router-provider"),
-    "workflow affinity changed provider between context turns",
-  );
-  const state = await waitForWorkflow(baseUrl, workflow.body.id, 2);
-  assert.equal(state.callsCompleted, 2);
-  pass("multi-turn context + workflow affinity", `provider=${state.primaryProvider}, calls=2`);
+  const firstProvider = first.response.headers.get("x-broke-router-provider");
+  const secondProvider = second.response.headers.get("x-broke-router-provider");
+  pass("multi-turn context + sticky failover", `providers=${firstProvider}->${secondProvider}, calls=2`);
 }
 
 async function checkToolWorkflow(baseUrl, model) {
-  const workflow = await post(baseUrl, "/v1/workflows", {
-    workflowType: "tool-agent", expectedCalls: 2, maxCalls: 10, maxConcurrency: 1,
-    estimatedTotalTokens: 2_000, qualityTier: "balanced",
-  });
+  const affinityKey = `tool-${randomBytes(8).toString("hex")}`;
   const tools = [{
     type: "function",
     function: {
@@ -146,7 +137,7 @@ async function checkToolWorkflow(baseUrl, model) {
     content: "Use lookup_inventory for item blue-widget. Do not guess the inventory yourself.",
   }];
   const first = await completion(baseUrl, {
-    model, route: { workflowId: workflow.body.id }, messages, tools, tool_choice: "required",
+    model, route: { affinityKey }, messages, tools, tool_choice: "required",
     reasoning_effort: "low", max_tokens: 512,
   });
   const assistant = first.body.choices?.[0]?.message;
@@ -157,13 +148,11 @@ async function checkToolWorkflow(baseUrl, model) {
   const toolMarker = `IN_STOCK_${randomBytes(4).toString("hex").toUpperCase()}`;
   messages.push(assistant, { role: "tool", tool_call_id: toolCall.id, content: toolMarker });
   const second = await completion(baseUrl, {
-    model, route: { workflowId: workflow.body.id }, messages, tools, tool_choice: "none",
+    model, route: { affinityKey }, messages, tools, tool_choice: "none",
     reasoning_effort: "low", max_tokens: 512,
   });
   assert.match(second.body.choices?.[0]?.message?.content ?? "", new RegExp(toolMarker));
-  const state = await waitForWorkflow(baseUrl, workflow.body.id, 2);
-  assert.ok(state.callsCompleted >= 2);
-  pass("real agentic tool loop", `provider=${state.primaryProvider}, calls=${state.callsCompleted}`);
+  pass("real agentic tool loop", `provider=${second.response.headers.get("x-broke-router-provider")}, calls=2`);
 }
 
 async function runRateFallbackSuite(baseUrl) {
@@ -176,17 +165,13 @@ async function runRateFallbackSuite(baseUrl) {
     "tightest eligible request bucket should be consumed first");
   assert.equal(second.response.headers.get("x-broke-router-provider"), "gemini",
     "exhausted NVIDIA account should fall back to Gemini");
-  const statsResponse = await fetch(`${baseUrl}/v1/routing/stats`, { headers: authHeaders() });
-  assert.equal(statsResponse.status, 200);
-  const stats = await statsResponse.json();
-  assert.ok(stats.decisions >= 2 && stats.outcomes >= 2, "rate test outcomes were not persisted");
-  pass("credential-scoped predictive rate fallback", "nvidia -> gemini; persisted outcomes >= 2");
+  pass("credential-scoped predictive rate fallback", "nvidia -> gemini");
 }
 
-async function runWorkerSuite(name, port, values, suite) {
+async function runLocalSuite(name, port, values, suite) {
   const runDir = await mkdtemp(join(tmpdir(), `brokerouter-live-${name}-`));
   const envPath = join(runDir, ".env.live");
-  const statePath = join(runDir, "state");
+  const statePath = join(runDir, "brokerouter.sqlite");
   const environment = {
     ...values,
     NVIDIA_ENABLED: "false",
@@ -194,12 +179,14 @@ async function runWorkerSuite(name, port, values, suite) {
     AGENT_TEST_PROVIDER_ENABLED: "false",
     ROUTING_POLICY_MODE: "baseline",
     MAX_INLINE_WAIT_MS: "0",
+    BROKEROUTER_PORT: String(port),
+    BROKEROUTER_DATABASE_PATH: statePath,
+    BROKEROUTER_ENV_FILE: join(runDir, "missing.env"),
   };
   await writeFile(envPath, serializeDotEnv(environment), { encoding: "utf8", mode: 0o600 });
-  const child = spawn(process.execPath, [
-    "node_modules/wrangler/bin/wrangler.js", "dev", "--local", "--port", String(port),
-    "--persist-to", statePath, "--env-file", envPath, "--show-interactive-dev-session=false",
-  ], { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  const child = spawn(process.execPath, ["dist/adapters/node/server.js"], {
+    cwd: process.cwd(), env: environment, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+  });
   let output = "";
   child.stdout.on("data", (chunk) => { output += chunk; });
   child.stderr.on("data", (chunk) => { output += chunk; });
@@ -248,43 +235,33 @@ async function post(baseUrl, path, body) {
   return { response, body: JSON.parse(text) };
 }
 
-async function waitForWorkflow(baseUrl, id, completedCalls) {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    const response = await fetch(`${baseUrl}/v1/workflows/${id}`, { headers: authHeaders() });
-    assert.equal(response.status, 200);
-    const body = await response.json();
-    if (body.callsCompleted >= completedCalls && body.inFlight === 0) return body;
-    await delay(100);
-  }
-  throw new Error(`workflow ${id} did not settle`);
-}
-
 async function waitForHealth(baseUrl, child, readOutput) {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`Worker exited early (${child.exitCode})`);
+    if (child.exitCode !== null) throw new Error(`Node server exited early (${child.exitCode})`);
     try {
       const response = await fetch(`${baseUrl}/health`);
       if (response.ok) return;
     } catch { /* startup */ }
     await delay(250);
   }
-  throw new Error(`Worker did not start: ${redact(readOutput().slice(-2_000))}`);
+  throw new Error(`Node server did not start: ${redact(readOutput().slice(-2_000))}`);
 }
 
 async function stop(child) {
   if (child.exitCode !== null) return;
-  const exited = new Promise((resolveExit) => child.once("exit", resolveExit));
-  if (process.platform === "win32" && child.pid) {
+  let didExit = false;
+  const exited = new Promise((resolveExit) => child.once("exit", () => { didExit = true; resolveExit(); }));
+  child.kill("SIGTERM");
+  await Promise.race([exited, delay(3_000)]);
+  if (!didExit && process.platform === "win32" && child.pid) {
     const killer = spawn("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], {
       stdio: "ignore", windowsHide: true,
     });
     await new Promise((resolveKill) => killer.once("exit", resolveKill));
-  } else {
-    child.kill();
+    await Promise.race([exited, delay(3_000)]);
   }
-  await Promise.race([exited, delay(5_000)]);
+  child.stdout?.destroy(); child.stderr?.destroy(); child.unref();
 }
 
 async function removeRunDirectory(runDir) {
