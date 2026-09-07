@@ -6,7 +6,8 @@ import { AsyncJobQueue } from "./adapters/cloudflare/async-job-queue";
 import { RoutingState } from "./adapters/cloudflare/routing-state";
 import { WorkflowCoordinator } from "./adapters/cloudflare/workflow-coordinator";
 import { authenticateCaller, requireScope } from "./core/auth";
-import { RouterError, type GenerationRequest } from "./core/types";
+import { RouterError, type GenerationRequest, type RouterErrorCode } from "./core/types";
+import { VIRTUAL_MODELS } from "./core/virtual-models";
 import { parseWorkflowOutcome, parseWorkflowSpec } from "./core/workflow";
 
 export { QuotaCoordinator, AsyncJobQueue, RoutingState, WorkflowCoordinator };
@@ -25,7 +26,7 @@ export default {
         requireScope(caller, "models:read");
         return Response.json({
           object: "list",
-          data: registeredProviders(env).flatMap((provider) => provider.models),
+          data: [...VIRTUAL_MODELS, ...registeredProviders(env).flatMap((provider) => provider.models)],
         });
       }
       if (url.pathname === "/v1/workflows" && request.method === "POST") {
@@ -139,12 +140,39 @@ export default {
       }
       return openAiError("invalid_request", "Not found", 404);
     } catch (error) {
-      if (error instanceof RouterError) return openAiError(error.code, error.message, error.status, error.retryAfterMs);
+      const routerError = normalizeRouterError(error);
+      if (routerError) {
+        return openAiError(routerError.code, routerError.message, routerError.status, routerError.retryAfterMs);
+      }
       console.error("Unhandled router error", error);
       return openAiError("upstream_error", "Router failed while processing the request.", 500);
     }
   },
 } satisfies ExportedHandler<Env>;
+
+const ROUTER_ERROR_CODES = new Set<RouterErrorCode>([
+  "invalid_request", "authentication_error", "authorization_error", "server_configuration_error",
+  "context_unavailable", "workflow_unavailable", "caller_rate_limited", "provider_unavailable",
+  "upstream_error",
+]);
+
+/** Durable Object RPC serializes Error instances, so preserve trusted router status metadata structurally. */
+function normalizeRouterError(error: unknown): RouterError | undefined {
+  if (error instanceof RouterError) return error;
+  if (!error || typeof error !== "object") return undefined;
+  const candidate = error as Record<string, unknown>;
+  if (typeof candidate.code !== "string" || !ROUTER_ERROR_CODES.has(candidate.code as RouterErrorCode)
+    || typeof candidate.message !== "string" || typeof candidate.status !== "number"
+    || !Number.isInteger(candidate.status) || candidate.status < 400 || candidate.status > 599
+    || (candidate.retryAfterMs !== undefined
+      && (typeof candidate.retryAfterMs !== "number" || !Number.isFinite(candidate.retryAfterMs)))) return undefined;
+  return new RouterError(
+    candidate.code as RouterErrorCode,
+    candidate.message,
+    candidate.status,
+    candidate.retryAfterMs as number | undefined,
+  );
+}
 
 async function parseGenerationRequest(request: Request): Promise<GenerationRequest> {
   try {

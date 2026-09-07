@@ -13,6 +13,8 @@
     "test:integration:isolated": "node scripts/integration-isolated.mjs",
     "test:integration:rate-fallback": "node scripts/integration-isolated.mjs --rate-fallback",
     "test:integration:caller-limit": "node scripts/integration-isolated.mjs --caller-limit",
+    "test:agent:hermes": "node scripts/integration-isolated.mjs --hermes-agent",
+    "test:live:hermes": "node scripts/hermes-live-test.mjs",
     "auth:key": "node scripts/generate-caller-key.mjs",
     "benchmark:local": "node scripts/benchmark-local.mjs",
     "benchmark:live": "node scripts/benchmark-live.mjs",

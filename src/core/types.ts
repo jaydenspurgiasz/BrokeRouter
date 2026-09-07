@@ -47,6 +47,8 @@ export interface GenerationRequest {
 export interface ModelProfile {
   id: string;
   provider: string;
+  /** Internal account identity. Quota and cooldown state are isolated per credential scope. */
+  credentialScope?: string;
   upstreamModel: string;
   contextWindow: number;
   maxOutputTokens: number;

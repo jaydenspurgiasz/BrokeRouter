@@ -2,6 +2,10 @@
 
 Free-tier-aware LLM routing for agents that should not accidentally spend money. The first deployment target is Cloudflare Workers and the first provider is NVIDIA's API Catalog, but the routing core deliberately uses Web APIs and provider/state ports rather than Cloudflare or NVIDIA concepts.
 
+The current deployable runtime is Cloudflare-native. Its routing, quota, workflow, and job state use
+Durable Objects, so an Oracle Cloud VM needs a separate runtime/state adapter; this repository is
+not yet a standalone Oracle/Node server.
+
 The personal deployment uses a `workers.dev` endpoint protected by independently revocable caller credentials; Cloudflare-hosted agents can use Service Bindings. A custom hostname and Cloudflare Access remain optional defense-in-depth upgrades. See [the security model](docs/security.md) and [adaptive routing roadmap](docs/adaptive-routing-roadmap.md).
 
 ## What exists
@@ -66,12 +70,14 @@ It is off by default to protect free-tier output budgets. The router strips reas
 
 ```bash
 npm install
-Copy-Item .dev.vars.example .dev.vars
-# Set NVIDIA_API_KEY in .dev.vars
+Copy-Item .env.example .env
+# Put provider account definitions and the local caller key in .env
 npm run dev
 ```
 
-The NVIDIA key is only read in the gateway Worker. An agent deployed as another Worker should call this service through a Cloudflare Service Binding, not via the public Internet.
+Use either `.env` or the legacy `.dev.vars`, not both; Wrangler gives `.dev.vars` precedence. Provider
+keys are only read in the gateway Worker. An agent deployed as another Worker should call this
+service through a Cloudflare Service Binding, not via the public Internet.
 
 ```ts
 const response = await env.LLM_GATEWAY.fetch("https://broke-router/v1/chat/completions", {
@@ -107,6 +113,7 @@ const response = await env.LLM_GATEWAY.fetch("https://broke-router/v1/chat/compl
 | `ADAPTIVE_MIN_OBSERVATIONS` | Evidence required before adaptive routing can control traffic. |
 | `ROUTING_EVENT_RETENTION_MS` | Metadata-only decision/outcome retention. Defaults to 30 days. |
 | `WORKFLOW_RETENTION_MS` | Terminal workflow retention. Defaults to 30 days. |
+| `BROKEROUTER_PROVIDER_ACCOUNT_<ACCOUNT>` | A secret JSON definition for one OpenAI-compatible provider account. Add any number of uniquely named bindings. |
 
 `NVIDIA_DAILY_SAFETY_BUDGET_TOKENS` is a local safety control, not a claim that NVIDIA provides that exact quota. The coordinator estimates and reserves input + requested maximum output before sending a call, then uses a provider error as authoritative evidence to halt attempts.
 
@@ -117,6 +124,29 @@ The gateway uses persisted token buckets to calculate the earliest admission slo
 ## Additional providers
 
 The NVIDIA adapter is built in. Add any provider with an OpenAI-compatible Chat Completions endpoint through `ADDITIONAL_OPENAI_COMPATIBLE_PROVIDERS_JSON`; its API key remains a Worker secret named by `apiKeyBinding`.
+
+For a local Hermes deployment, the simpler account-per-variable format is recommended. Copy
+`.env.example` to `.env` and add one `BROKEROUTER_PROVIDER_ACCOUNT_<ACCOUNT>` entry per token. Each
+value is self-contained JSON with `provider`, `endpoint`, `apiKey`, `models`, and optional
+`rateLimits`, `credentialScope`, `enabled`. The variable suffix becomes the credential scope when
+one is not supplied:
+
+```dotenv
+BROKEROUTER_PROVIDER_ACCOUNT_GROQ_PRIMARY='{"provider":"groq","endpoint":"https://api.groq.com/openai/v1/chat/completions","apiKey":"gsk-replace-me","models":[{"id":"free/default","upstreamModel":"replace-with-current-free-model-id","contextWindow":65536,"maxOutputTokens":4096,"supports":{"streaming":true,"tools":true,"structuredOutput":false,"vision":false},"tier":"fast","free":true}]}'
+BROKEROUTER_PROVIDER_ACCOUNT_GROQ_BACKUP='{"provider":"groq","endpoint":"https://api.groq.com/openai/v1/chat/completions","apiKey":"gsk-replace-me-too","models":[{"id":"free/default","upstreamModel":"replace-with-current-free-model-id","contextWindow":65536,"maxOutputTokens":4096,"supports":{"streaming":true,"tools":true,"structuredOutput":false,"vision":false},"tier":"fast","free":true}]}'
+```
+
+`.env` and other `.env*` files are ignored; only the placeholder `.env.example` is committed. Never
+put a real token in the example. BrokeRouter discovers every matching variable automatically. The
+two entries above both identify provider `groq`, but their scopes (`primary` and `backup`) get
+separate request/token buckets, daily budgets, concurrency leases, cooldowns, and explicit model
+IDs (`groq@primary/free/default` and `groq@backup/free/default`). Automatic `free/default` routing
+can use either account. Tokens stay in provider invocation closures and are not returned by
+`/v1/models`, recorded in quota state, or included in routing telemetry.
+
+The model facts and limits are intentionally explicit rather than guessed from a token. Copy their
+current values from the provider's documentation: overstating context, capabilities, or free-tier
+limits can make routing unsafe. Set `"enabled":false` to temporarily skip one account.
 
 ```json
 [
@@ -147,7 +177,10 @@ The NVIDIA adapter is built in. Add any provider with an OpenAI-compatible Chat 
 
 Declare `GROQ_API_KEY` as a secret, not in this JSON. Multiple configured providers share the request's routing candidate list but never share quota state: each `id` + `credentialScope` has its own coordinator. Replace the example model and limits with the provider's actual published capabilities and allowances.
 
-`free/default` is a router alias: it considers every eligible free model. Provider configuration turns that entry into a unique explicit model ID—for example `gemini/free/default`—so a caller can force one provider during a diagnostic test.
+`free/default` is a router alias: it considers every eligible free model. Account configuration
+turns that entry into a credential-specific explicit ID such as `gemini@primary/free/default`, so
+a caller can force one account during a diagnostic test. The legacy registry retains IDs such as
+`gemini/free/default`.
 
 ## Integration smoke test
 
@@ -194,11 +227,29 @@ See `benchmarks/LIVE.md`. An optional bounded real-provider sample is enabled ex
 
 ## Current model aliases
 
+- `free/hermes` — virtual free-only agent tier; every candidate must provide at least 65,536 context, tool calling, streaming, and at least 4,096 output tokens.
 - `free/default` — text-oriented NVIDIA default.
 - `nvidia/openai/gpt-oss-20b` — explicit version of the default.
 - `vision/default` — NVIDIA-hosted vision-capable fallback.
 
 Capability and context fields are stored in `src/core/models.ts`, intentionally as auditable configuration. Refresh them from provider documentation before relying on a changed model catalog.
+
+Run a deterministic two-turn agent/tool loop through the real local gateway, routing, admission,
+and response-normalization path without using an external API token:
+
+```bash
+npm run test:agent:hermes
+```
+
+With real provider accounts in the ignored `.env`, run the bounded live suite:
+
+```bash
+npm run test:live:hermes
+```
+
+It verifies both configured providers, SSE, multi-turn chat context, workflow affinity/accounting,
+a model-requested tool loop, and credential-scoped rate-limit fallback. It uses temporary isolated
+Durable Object state and removes its temporary secret copy after the run.
 
 ## Adding another provider
 

@@ -4,6 +4,11 @@ BrokeRouter deploys as one personal Worker named `broke-router`. The initial ver
 free `workers.dev` hostname and BrokeRouter's hashed caller authentication. A custom domain and
 Cloudflare Access are optional later upgrades.
 
+This build is Cloudflare-native, not a standalone Node.js server. It depends on Durable Object
+bindings and their SQLite storage, so it cannot be copied directly onto an Oracle Cloud VM. An
+Oracle deployment requires a separate runtime adapter plus replacements for quota, routing,
+workflow, and job state (for example PostgreSQL/Redis and a durable job runner).
+
 ## 1. Log in and validate
 
 ```powershell
@@ -42,21 +47,23 @@ versioned SQLite migrations.
 ## 4. Upload secrets
 
 ```powershell
-npx wrangler secret put NVIDIA_API_KEY
-npx wrangler secret put GEMINI_API_KEY
-npx wrangler secret put ADDITIONAL_OPENAI_COMPATIBLE_PROVIDERS_JSON
+npx wrangler secret put BROKEROUTER_PROVIDER_ACCOUNT_NVIDIA_PRIMARY
+npx wrangler secret put BROKEROUTER_PROVIDER_ACCOUNT_GEMINI_PRIMARY
 npx wrangler secret put CALLER_CREDENTIALS_JSON
 ```
 
-Paste each value interactively. Use the provider registry JSON that passed local tests. A current
-Gemini example is:
+Paste each complete one-line account JSON value from the private `.env` interactively. The JSON,
+including its API key, is stored as one encrypted Worker secret. Repeat the command with a unique
+suffix for every additional account. A placeholder-only Gemini example is:
 
 ```json
-[{"id":"gemini","endpoint":"https://generativelanguage.googleapis.com/v1beta/openai/chat/completions","apiKeyBinding":"GEMINI_API_KEY","credentialScope":"primary","rateLimits":{"requests":{"limit":5,"windowMs":60000},"tokens":{"limit":100000,"windowMs":60000},"maxConcurrent":1},"models":[{"id":"free/default","upstreamModel":"gemini-3.6-flash","contextWindow":1000000,"maxOutputTokens":64000,"supports":{"streaming":true,"tools":true,"structuredOutput":true,"vision":true},"tier":"balanced","free":true}]}]
+{"provider":"gemini","endpoint":"https://generativelanguage.googleapis.com/v1beta/openai/chat/completions","apiKey":"replace-with-real-key-only-in-the-secret-prompt","models":[{"id":"free/default","upstreamModel":"gemini-3.5-flash-lite","contextWindow":1048576,"maxOutputTokens":65536,"supports":{"streaming":true,"tools":true,"structuredOutput":true,"vision":true},"tier":"balanced","free":true}],"rateLimits":{"dailySafetyBudgetTokens":0,"cooldownMs":900000,"requests":{"limit":5,"windowMs":60000},"tokens":{"limit":100000,"windowMs":60000},"maxConcurrent":1,"reservationTtlMs":120000}}
 ```
 
 The rate limits are conservative examples. Replace them with the active RPM/TPM values shown in
-Google AI Studio. Deploy once more after all secrets exist:
+Google AI Studio. The legacy `NVIDIA_API_KEY` and `ADDITIONAL_OPENAI_COMPATIBLE_PROVIDERS_JSON`
+secrets remain supported for existing deployments, but are not needed for the account format.
+Deploy once more after all secrets exist:
 
 ```powershell
 npm run deploy

@@ -5,10 +5,12 @@ import type { WorkflowCoordinator } from "./adapters/cloudflare/workflow-coordin
 
 /** Runtime bindings shared by the Worker and its Durable Objects. */
 export interface Env {
-  NVIDIA_API_KEY: string;
+  NVIDIA_API_KEY?: string;
   NVIDIA_ENABLED?: string;
   /** Enables an explicit, non-automatic deterministic model for deployed server benchmarks. */
   BENCHMARK_PROVIDER_ENABLED?: string;
+  /** Enables the deterministic tool-calling provider used only by the Hermes integration test. */
+  AGENT_TEST_PROVIDER_ENABLED?: string;
   /** Preferred multi-caller registry. Store as an encrypted Worker secret. */
   CALLER_CREDENTIALS_JSON?: string;
   /** Transitional single-key authentication for local development only. */
@@ -30,6 +32,11 @@ export interface Env {
   ADAPTIVE_EXPLORATION_RATE?: string;
   ADAPTIVE_MIN_OBSERVATIONS?: string;
   ADDITIONAL_OPENAI_COMPATIBLE_PROVIDERS_JSON?: string;
+  /**
+   * Zero or more secret bindings named BROKEROUTER_PROVIDER_ACCOUNT_<ACCOUNT>.
+   * Each value is a self-contained JSON provider-account definition.
+   */
+  [binding: `BROKEROUTER_PROVIDER_ACCOUNT_${string}`]: unknown;
   QUOTA_COORDINATOR: DurableObjectNamespace<QuotaCoordinator>;
   CALLER_QUOTA_COORDINATOR: DurableObjectNamespace<QuotaCoordinator>;
   ASYNC_JOB_QUEUE: DurableObjectNamespace<AsyncJobQueue>;

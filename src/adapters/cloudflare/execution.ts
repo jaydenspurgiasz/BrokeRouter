@@ -4,7 +4,7 @@ import type { AvailableCandidate } from "../../core/policy";
 import { selectRoutes } from "../../core/route";
 import { RouterError, type GenerationRequest, type ProviderRateLimitSettings, type RouteSelection } from "../../core/types";
 import { applyWorkflowContext, workflowContextKey, type WorkflowRecord } from "../../core/workflow";
-import type { RegisteredProvider } from "../../providers/openai-compatible";
+import { providerForModel, type RegisteredProvider } from "../../providers/openai-compatible";
 import type { AdmissionQuote, QuotaCoordinator, ReservationResult } from "./quota-coordinator";
 import { optionalPositiveNumber, registeredProviders } from "./provider-registry";
 import type { CallOutcomeEvent, PolicyControl, RoutingDecisionEvent, RoutingState } from "./routing-state";
@@ -95,8 +95,8 @@ export async function executeGeneration(
   const finalize = (result: {
     success: boolean; status: number; actualTokens?: number; timeToFirstTokenMs?: number;
     quotaSuccess: boolean; cooldown?: boolean; retryAfterMs?: number;
-  }): void => {
-    if (finalized) return;
+  }): Promise<void> => {
+    if (finalized) return Promise.resolve();
     finalized = true;
     const completedAt = Date.now();
     const tasks: Promise<unknown>[] = [
@@ -122,20 +122,22 @@ export async function executeGeneration(
     if (workflowCallId && workflowCoordinator) {
       tasks.push(workflowCoordinator.finishCall(workflowCallId, result.success, result.actualTokens));
     }
-    waitUntil(Promise.all(tasks));
+    const completion = Promise.all(tasks).then(() => undefined);
+    waitUntil(completion);
+    return completion;
   };
 
   let upstream: Response;
   try {
     upstream = await provider.invoke(effectiveGeneration, selection.model);
   } catch {
-    finalize({ success: false, status: 502, quotaSuccess: false, cooldown: true });
+    await finalize({ success: false, status: 502, quotaSuccess: false, cooldown: true });
     throw new RouterError("upstream_error", `${provider.id} could not be reached.`, 502);
   }
 
   if (!upstream.ok) {
     const retryAfterMs = retryAfter(upstream);
-    finalize({
+    await finalize({
       success: false, status: upstream.status, quotaSuccess: false,
       cooldown: upstream.status === 429 || upstream.status >= 500, retryAfterMs,
     });
@@ -146,7 +148,7 @@ export async function executeGeneration(
     return observedStream(upstream, provider.id, selection.model.id, policy.activePolicy, startedAt, finalize);
   }
   const sanitized = await sanitizeCompletion(upstream, provider.id, selection.model.id, policy.activePolicy);
-  finalize({ success: true, status: upstream.status, quotaSuccess: true, actualTokens: sanitized.actualTokens });
+  await finalize({ success: true, status: upstream.status, quotaSuccess: true, actualTokens: sanitized.actualTokens });
   return sanitized.response;
 }
 
@@ -241,7 +243,7 @@ async function inspectCandidates(
   selections: RouteSelection[], providers: RegisteredProvider[], env: Env,
 ): Promise<CandidateRuntime[]> {
   const candidates = selections.flatMap((selection, catalogOrder): Omit<CandidateRuntime, "quote">[] => {
-    const provider = providers.find((item) => item.id === selection.model.provider);
+    const provider = providerForModel(providers, selection.model);
     if (!provider) return [];
     return [{
       selection,
@@ -343,16 +345,18 @@ function earliestRetry(candidates: CandidateRuntime[]): number | undefined {
   return values.length ? Math.min(...values) : undefined;
 }
 
-function observedStream(
+async function observedStream(
   upstream: Response,
   provider: string,
   model: string,
   policy: string,
   startedAt: number,
-  finalize: (result: { success: boolean; status: number; quotaSuccess: boolean; timeToFirstTokenMs?: number }) => void,
-): Response {
+  finalize: (result: {
+    success: boolean; status: number; quotaSuccess: boolean; timeToFirstTokenMs?: number;
+  }) => Promise<void>,
+): Promise<Response> {
   if (!upstream.body) {
-    finalize({ success: true, status: upstream.status, quotaSuccess: true });
+    await finalize({ success: true, status: upstream.status, quotaSuccess: true });
     return passthrough(upstream, provider, model, "policy-selected", policy);
   }
   const reader = upstream.body.getReader();
@@ -362,20 +366,20 @@ function observedStream(
       try {
         const chunk = await reader.read();
         if (chunk.done) {
-          finalize({ success: true, status: upstream.status, quotaSuccess: true, timeToFirstTokenMs: ttft });
+          await finalize({ success: true, status: upstream.status, quotaSuccess: true, timeToFirstTokenMs: ttft });
           controller.close();
           return;
         }
         ttft ??= Date.now() - startedAt;
         controller.enqueue(chunk.value);
       } catch (error) {
-        finalize({ success: false, status: 502, quotaSuccess: true, timeToFirstTokenMs: ttft });
+        await finalize({ success: false, status: 502, quotaSuccess: true, timeToFirstTokenMs: ttft });
         controller.error(error);
       }
     },
     async cancel(reason) {
       await reader.cancel(reason);
-      finalize({ success: false, status: 499, quotaSuccess: true, timeToFirstTokenMs: ttft });
+      await finalize({ success: false, status: 499, quotaSuccess: true, timeToFirstTokenMs: ttft });
     },
   });
   const headers = routedHeaders(upstream.headers, provider, model, "policy-selected", policy);

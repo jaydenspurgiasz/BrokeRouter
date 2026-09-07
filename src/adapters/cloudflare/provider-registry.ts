@@ -1,7 +1,9 @@
 import type { Env } from "../../config";
 import { NVIDIA_MODELS } from "../../core/models";
 import type { ProviderRateLimitSettings } from "../../core/types";
-import { configuredOpenAiCompatibleProviders, type RegisteredProvider } from "../../providers/openai-compatible";
+import {
+  configuredOpenAiCompatibleProviders, configuredProviderAccounts, type RegisteredProvider,
+} from "../../providers/openai-compatible";
 import { invokeNvidia } from "../../providers/nvidia";
 import { benchmarkProvider } from "../../providers/benchmark";
 
@@ -12,15 +14,30 @@ export function registeredProviders(env: Env): RegisteredProvider[] {
     credentialScope: "default",
     models: NVIDIA_MODELS,
     rateLimits: nvidiaLimits,
-    invoke: (request, model) => invokeNvidia(request, model, env.NVIDIA_API_KEY),
+    invoke: (request, model) => invokeNvidia(request, model, env.NVIDIA_API_KEY!),
   };
-  const builtIns = env.NVIDIA_ENABLED === "false" ? [] : [nvidia];
-  const diagnostics = env.BENCHMARK_PROVIDER_ENABLED === "true" ? [benchmarkProvider()] : [];
-  return [...builtIns, ...configuredOpenAiCompatibleProviders(
+  const builtIns = env.NVIDIA_ENABLED === "false" || !env.NVIDIA_API_KEY ? [] : [nvidia];
+  const agenticTest = env.AGENT_TEST_PROVIDER_ENABLED === "true";
+  const diagnostics = env.BENCHMARK_PROVIDER_ENABLED === "true" || agenticTest
+    ? [benchmarkProvider({ agentic: agenticTest })] : [];
+  const providers = [...builtIns, ...configuredOpenAiCompatibleProviders(
     env.ADDITIONAL_OPENAI_COMPATIBLE_PROVIDERS_JSON,
-    env as unknown as Record<string, unknown>,
+    env,
     nvidiaLimits,
-  ), ...diagnostics];
+  ), ...configuredProviderAccounts(env, nvidiaLimits), ...diagnostics];
+  assertUniqueProviderAccounts(providers);
+  return providers;
+}
+
+function assertUniqueProviderAccounts(providers: RegisteredProvider[]): void {
+  const seen = new Set<string>();
+  for (const provider of providers) {
+    const identity = `${provider.id}:${provider.credentialScope}`;
+    if (seen.has(identity)) {
+      throw new Error(`Provider account ${identity} is configured more than once`);
+    }
+    seen.add(identity);
+  }
 }
 
 export function quotaSettings(env: Env): ProviderRateLimitSettings {

@@ -22,6 +22,21 @@ describe("selectRoute", () => {
     expect(route.model.supports.vision).toBe(true);
   });
 
+  it("accepts assistant tool-call messages without content", () => {
+    expect(() => selectRoute({
+      ...baseRequest,
+      messages: [
+        { role: "user", content: "Look this up." },
+        { role: "assistant", content: undefined, tool_calls: [{ id: "call_1", type: "function" }] },
+        { role: "tool", content: "found", tool_call_id: "call_1" },
+      ],
+    })).not.toThrow();
+  });
+
+  it("rejects malformed messages instead of throwing an internal type error", () => {
+    expect(() => selectRoute({ ...baseRequest, messages: [null as never] })).toThrow(RouterError);
+  });
+
   it("refuses a request that cannot fit without truncation", () => {
     expect(() => selectRoute({ ...baseRequest, max_tokens: 999_999 })).toThrow(RouterError);
   });
@@ -48,5 +63,21 @@ describe("selectRoute", () => {
       .not.toEqual(expect.arrayContaining([expect.objectContaining({ model: diagnostic })]));
     expect(selectRoute({ ...baseRequest, model: "benchmark/echo" }, [diagnostic]).model.id)
       .toBe("benchmark/echo");
+  });
+
+  it("enforces the free/hermes virtual model contract", () => {
+    const capable: ModelProfile = {
+      id: "provider-a/model", provider: "provider-a", upstreamModel: "model",
+      contextWindow: 128_000, maxOutputTokens: 8_192,
+      supports: { streaming: true, tools: true, structuredOutput: false, vision: false },
+      tier: "balanced", free: true,
+    };
+    const noTools = { ...capable, id: "provider-b/model", provider: "provider-b", supports: { ...capable.supports, tools: false } };
+    const tooSmall = { ...capable, id: "provider-c/model", provider: "provider-c", contextWindow: 32_000 };
+    const paid = { ...capable, id: "provider-d/model", provider: "provider-d", free: false };
+    const routes = selectRoutes({ ...baseRequest, model: "free/hermes", route: { allowPaid: true } }, [
+      noTools, tooSmall, paid, capable,
+    ]);
+    expect(routes.map((route) => route.model.id)).toEqual([capable.id]);
   });
 });

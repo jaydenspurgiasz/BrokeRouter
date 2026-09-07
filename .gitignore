@@ -3,6 +3,7 @@ node_modules/
 dist/
 .dev.vars*
 .env*
+!.env.example
 .secrets.*
 coverage/
 benchmarks/results/

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -7,17 +7,31 @@ import { createHash } from "node:crypto";
 const rateFallback = process.argv.includes("--rate-fallback");
 const callerLimit = process.argv.includes("--caller-limit");
 const liveBenchmark = process.argv.includes("--live-benchmark");
-const port = rateFallback ? 8791 : callerLimit ? 8793 : liveBenchmark ? 8795 : 8792;
+const hermesAgent = process.argv.includes("--hermes-agent");
+const port = rateFallback ? 8791 : callerLimit ? 8793 : liveBenchmark ? 8795 : hermesAgent ? 8797 : 8792;
 const baseUrl = `http://127.0.0.1:${port}`;
 const stateDir = await mkdtemp(join(tmpdir(), "broke-router-integration-"));
+const envFile = join(stateDir, ".env.isolated");
 const argumentsList = [
   "node_modules/wrangler/bin/wrangler.js", "dev", "--local", "--port", String(port),
   "--persist-to", stateDir, "--show-interactive-dev-session=false",
 ];
+if (hermesAgent || liveBenchmark) {
+  // Deterministic modes must never auto-load real provider keys or consume external quota.
+  await writeFile(envFile, "# intentionally empty\n", { encoding: "utf8", mode: 0o600 });
+  argumentsList.push("--env-file", envFile);
+}
 if (liveBenchmark) argumentsList.push(
   "--var", "NVIDIA_ENABLED:false",
   "--var", "BENCHMARK_PROVIDER_ENABLED:true",
   "--var", "ROUTER_API_KEY:local-test-key",
+);
+if (hermesAgent) argumentsList.push(
+  "--var", "NVIDIA_ENABLED:false",
+  "--var", "BENCHMARK_PROVIDER_ENABLED:false",
+  "--var", "AGENT_TEST_PROVIDER_ENABLED:true",
+  "--var", "ROUTER_API_KEY:local-test-key",
+  "--var", "ROUTING_POLICY_MODE:baseline",
 );
 if (rateFallback) argumentsList.push(
   "--var", "NVIDIA_REQUESTS_PER_WINDOW:1",
@@ -67,7 +81,10 @@ async function waitForHealth() {
 
 function runSmokeTest() {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [liveBenchmark ? "scripts/benchmark-live.mjs" : "scripts/integration-smoke.mjs"], {
+    const child = spawn(process.execPath, [
+      liveBenchmark ? "scripts/benchmark-live.mjs"
+        : hermesAgent ? "scripts/hermes-agent-test.mjs" : "scripts/integration-smoke.mjs",
+    ], {
       cwd: process.cwd(), stdio: "inherit",
       env: {
         ...process.env,
