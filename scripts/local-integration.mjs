@@ -9,10 +9,14 @@ const directory = await mkdtemp(join(tmpdir(), "brokerouter-node-"));
 const routerPort = 8878; const upstreamPort = 8879; const routerKey = "local-router-key-with-at-least-32-characters";
 const model = (id) => ({ id: "free/default", upstreamModel: id, contextWindow: 131072, maxOutputTokens: 8192,
   supports: { streaming: true, tools: true, structuredOutput: false, vision: false }, tier: "balanced", free: true });
+const inheritedEnvironment = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+  !name.startsWith("BROKEROUTER_PROVIDER_ACCOUNT_") && name !== "NVIDIA_API_KEY" && name !== "ROUTER_API_KEY"),
+);
 const environment = {
-  ...process.env,
+  ...inheritedEnvironment,
   BROKEROUTER_PORT: String(routerPort),
   BROKEROUTER_DATABASE_PATH: join(directory, "router.sqlite"),
+  BROKEROUTER_ENV_FILE: join(directory, "missing.env"),
   ROUTER_API_KEY: routerKey,
   NVIDIA_ENABLED: "false",
   BROKEROUTER_PROVIDER_ACCOUNT_MOCK_ALPHA: JSON.stringify({ provider: "mock", credentialScope: "alpha",

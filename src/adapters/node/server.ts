@@ -6,7 +6,7 @@ import { readFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { authenticateCaller, requireScope } from "../../core/auth";
 import { RouterError, type GenerationRequest, type ProviderRateLimitSettings } from "../../core/types";
-import { VIRTUAL_MODELS } from "../../core/virtual-models";
+import { satisfiesVirtualModel, virtualModel, VIRTUAL_MODELS } from "../../core/virtual-models";
 import { registeredProviders } from "../cloudflare/provider-registry";
 import { executeLocalGeneration } from "./execution";
 import { SqliteState } from "./sqlite-state";
@@ -32,7 +32,10 @@ const server = createServer(async (incoming: any, outgoing: any) => {
     outgoing.writeHead(response.status, responseHeaders);
     if (!response.body) return outgoing.end();
     const reader = response.body.getReader();
+    const cancelOnDisconnect = () => { void reader.cancel(); };
+    outgoing.once("close", cancelOnDisconnect);
     while (true) { const chunk = await reader.read(); if (chunk.done) break; if (!outgoing.write(chunk.value)) await onceDrain(outgoing); }
+    outgoing.off("close", cancelOnDisconnect);
     outgoing.end();
   } catch (error) {
     const routed = error instanceof RouterError ? error : undefined;
@@ -49,6 +52,11 @@ const server = createServer(async (incoming: any, outgoing: any) => {
 async function handle(request: Request): Promise<Response> {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/health") return Response.json({ ok: true, service: "broke-router", runtime: "node-sqlite" });
+  if (request.method === "GET" && url.pathname === "/ready") {
+    const hermes = virtualModel("free/hermes")!;
+    const ready = providers.some((provider) => provider.models.some((model) => satisfiesVirtualModel(model, hermes))) && state.ready();
+    return Response.json({ ok: ready, providers: providers.length, runtime: "node-sqlite" }, { status: ready ? 200 : 503 });
+  }
   const caller = await authenticateCaller(request, env as any);
   if (request.method === "GET" && url.pathname === "/v1/models") {
     requireScope(caller, "models:read");
@@ -71,7 +79,15 @@ async function handle(request: Request): Promise<Response> {
 }
 
 server.listen(port, host, () => console.log(`BrokeRouter listening on http://${host}:${port} with SQLite state at ${databasePath}`));
-for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => server.close(() => { state.close(); process.exit(0); }));
+let stopping = false;
+for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => {
+  if (stopping) return;
+  stopping = true;
+  const finish = () => { state.close(); process.exit(0); };
+  server.close(finish);
+  const force: any = setTimeout(() => { server.closeAllConnections?.(); finish(); }, 20_000);
+  force.unref?.();
+});
 
 async function toRequest(incoming: any, fallbackHost: string, fallbackPort: number): Promise<Request> {
   const chunks: Uint8Array[] = []; let total = 0;

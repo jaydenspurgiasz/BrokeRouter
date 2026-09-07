@@ -30,42 +30,58 @@ export async function executeLocalGeneration(
 
   let retryAfterMs: number | undefined;
   let lastStatus = 503;
+  const callerScope = `caller:${identity.environment}:${identity.callerId}`;
+  let callerReservationId: string | undefined;
+  const reserveCaller = (): void => {
+    if (callerReservationId) return;
+    const reservation = state.reserve(callerScope, candidates[0]?.reservedTokens ?? 1, identity.rateLimits);
+    if (!reservation.allowed || !reservation.reservationId) {
+      throw new RouterError("caller_rate_limited", "Caller rate limit exceeded.", 429, reservation.retryAfterMs);
+    }
+    callerReservationId = reservation.reservationId;
+  };
+  const settleCaller = (success: boolean, actualTokens?: number): void => {
+    if (!callerReservationId) return;
+    state.settle(callerScope, callerReservationId, { success, actualTokens, settings: identity.rateLimits });
+    callerReservationId = undefined;
+  };
   for (const selection of candidates) {
     const provider = providerForModel(providers, selection.model);
     if (!provider) continue;
     const providerScope = `provider:${provider.id}:${provider.credentialScope}`;
-    const callerScope = `caller:${identity.environment}:${identity.callerId}`;
     const providerQuote = state.inspect(providerScope, selection.reservedTokens, provider.rateLimits);
     if (!providerQuote.allowed) { retryAfterMs = earliest(retryAfterMs, providerQuote.retryAfterMs); continue; }
-    const callerReservation = state.reserve(callerScope, selection.reservedTokens, identity.rateLimits);
-    if (!callerReservation.allowed || !callerReservation.reservationId) {
-      throw new RouterError("caller_rate_limited", "Caller rate limit exceeded.", 429, callerReservation.retryAfterMs);
-    }
+    reserveCaller();
     const providerReservation = state.reserve(providerScope, selection.reservedTokens, provider.rateLimits);
     if (!providerReservation.allowed || !providerReservation.reservationId) {
-      state.settle(callerScope, callerReservation.reservationId, { success: false, settings: identity.rateLimits });
       retryAfterMs = earliest(retryAfterMs, providerReservation.retryAfterMs);
       continue;
     }
 
+    const controller = new AbortController();
+    // A live reservation must never outlast the upstream request. This keeps a hung request
+    // from being reclaimed as stale and violating the credential's concurrency ceiling.
+    const deadlineMs = Math.max(1_000, Math.min(90_000, provider.rateLimits.reservationTtlMs - 1_000));
+    const deadline: any = setTimeout(() => controller.abort(), deadlineMs);
+    const clearDeadline = () => clearTimeout(deadline);
     let upstream: Response;
     try {
-      upstream = await provider.invoke(request, selection.model);
+      upstream = await provider.invoke(request, selection.model, controller.signal);
     } catch (error) {
+      clearDeadline();
       const detail = error instanceof Error ? `${error.name}: ${error.message}` : "unknown transport error";
       console.error(`Provider invocation failed for ${provider.id}:${provider.credentialScope}: ${detail}`);
       state.settle(providerScope, providerReservation.reservationId, { success: false, cooldown: true, settings: provider.rateLimits });
-      state.settle(callerScope, callerReservation.reservationId, { success: false, settings: identity.rateLimits });
       lastStatus = 502;
       continue;
     }
 
     if (upstream.status === 429 || upstream.status >= 500) {
+      clearDeadline();
       const delay = retryAfter(upstream);
       state.settle(providerScope, providerReservation.reservationId, {
         success: false, cooldown: true, retryAfterMs: delay, settings: provider.rateLimits,
       });
-      state.settle(callerScope, callerReservation.reservationId, { success: false, settings: identity.rateLimits });
       retryAfterMs = earliest(retryAfterMs, delay);
       lastStatus = upstream.status;
       await upstream.body?.cancel().catch(() => undefined);
@@ -73,21 +89,24 @@ export async function executeLocalGeneration(
     }
 
     if (!upstream.ok) {
+      clearDeadline();
       state.settle(providerScope, providerReservation.reservationId, { success: false, settings: provider.rateLimits });
-      state.settle(callerScope, callerReservation.reservationId, { success: false, settings: identity.rateLimits });
+      settleCaller(false);
       return routed(upstream, provider.id, selection.model.id);
     }
     if (affinityHash) state.setAffinity(identity.environment, identity.callerId, alias, affinityHash,
       provider.id, provider.credentialScope, selection.model.id);
     const finalize = (success: boolean, actualTokens?: number) => {
       state.settle(providerScope, providerReservation.reservationId!, { success, actualTokens, settings: provider.rateLimits });
-      state.settle(callerScope, callerReservation.reservationId!, { success, actualTokens, settings: identity.rateLimits });
+      settleCaller(success, actualTokens);
     };
-    if (request.stream) return routed(streamWithFinalizer(upstream, finalize), provider.id, selection.model.id);
+    if (request.stream) return routed(streamWithFinalizer(upstream, finalize, clearDeadline), provider.id, selection.model.id);
     const normalized = await sanitize(upstream);
+    clearDeadline();
     finalize(true, normalized.actualTokens);
     return routed(normalized.response, provider.id, selection.model.id);
   }
+  settleCaller(false);
   throw new RouterError("provider_unavailable", `All eligible provider accounts are unavailable (last upstream status ${lastStatus}).`, 503, retryAfterMs);
 }
 
@@ -116,10 +135,10 @@ function routed(response: Response, provider: string, model: string): Response {
   headers.set("x-broke-router-route", "local-sqlite");
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
-function streamWithFinalizer(response: Response, finalize: (success: boolean) => void): Response {
-  if (!response.body) { finalize(true); return response; }
+function streamWithFinalizer(response: Response, finalize: (success: boolean) => void, clearDeadline: () => void): Response {
+  if (!response.body) { clearDeadline(); finalize(true); return response; }
   const reader = response.body.getReader(); let done = false;
-  const finish = (success: boolean) => { if (!done) { done = true; finalize(success); } };
+  const finish = (success: boolean) => { if (!done) { done = true; clearDeadline(); finalize(success); } };
   const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
       try { const chunk = await reader.read(); if (chunk.done) { finish(true); controller.close(); } else controller.enqueue(chunk.value); }

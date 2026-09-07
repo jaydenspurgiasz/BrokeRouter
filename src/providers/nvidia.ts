@@ -6,6 +6,7 @@ export async function invokeNvidia(
   request: GenerationRequest,
   model: ModelProfile,
   apiKey: string,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const { route: _route, model: _model, ...body } = request;
   const callerTemplateOptions = asRecord(body.chat_template_kwargs);
@@ -26,6 +27,7 @@ export async function invokeNvidia(
         enable_thinking: request.route?.reasoning === "on",
       },
     }),
+    signal,
   });
 }
 

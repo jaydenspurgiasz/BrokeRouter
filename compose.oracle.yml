@@ -2,25 +2,34 @@ services:
   brokerouter:
     build: .
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
       BROKEROUTER_HOST: 0.0.0.0
       BROKEROUTER_DATABASE_PATH: /data/brokerouter.sqlite
+      BROKEROUTER_ENV_FILE: /run/secrets/brokerouter.env
+    secrets:
+      - source: brokerouter_env
+        target: brokerouter.env
     volumes:
       - brokerouter-data:/data
     networks:
       - hermes-private
     read_only: true
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
     tmpfs:
       - /tmp
 
-  # Point an existing Hermes container at http://brokerouter:8787/v1.
-  # Hermes is intentionally not started by this file unless you add it here.
+  # Attach Hermes to the external brokerouter-hermes-private network and point it at
+  # http://brokerouter:8787/v1. Hermes is intentionally not started by this file.
 
 volumes:
   brokerouter-data:
 
 networks:
   hermes-private:
-    internal: true
+    external: true
+    name: ${BROKEROUTER_HERMES_NETWORK:-brokerouter-hermes-private}

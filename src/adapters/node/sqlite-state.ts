@@ -1,6 +1,7 @@
 // @ts-ignore Node's built-in SQLite types are not included in the Worker typecheck environment.
 import { DatabaseSync } from "node:sqlite";
 import type { ProviderRateLimitSettings } from "../../core/types";
+import { RouterError } from "../../core/types";
 
 export interface LocalAdmission {
   allowed: boolean;
@@ -13,10 +14,12 @@ export class SqliteState {
 
   constructor(path: string) {
     this.db = new DatabaseSync(path);
-    this.db.exec(`
-      PRAGMA journal_mode=WAL;
-      PRAGMA foreign_keys=ON;
-      PRAGMA busy_timeout=5000;
+    this.db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const version = this.db.prepare("PRAGMA user_version").get().user_version as number;
+      if (version > 1) throw new Error(`SQLite schema version ${version} is newer than this BrokeRouter runtime`);
+      this.db.exec(`
       CREATE TABLE IF NOT EXISTS quota_values (
         scope TEXT NOT NULL, key TEXT NOT NULL, value INTEGER NOT NULL,
         PRIMARY KEY (scope, key)
@@ -31,15 +34,21 @@ export class SqliteState {
         model_id TEXT NOT NULL, updated_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
         PRIMARY KEY (environment, caller_id, alias, key_hash)
       );
-    `);
-    const affinityColumns = this.db.prepare("PRAGMA table_info(affinity)").all();
-    if (!affinityColumns.some((column: { name: string }) => column.name === "expires_at")) {
-      this.db.exec("ALTER TABLE affinity ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0");
+      `);
+      const affinityColumns = this.db.prepare("PRAGMA table_info(affinity)").all();
+      if (!affinityColumns.some((column: { name: string }) => column.name === "expires_at")) {
+        this.db.exec("ALTER TABLE affinity ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0");
+      }
+      this.db.exec("PRAGMA user_version=1; COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* startup transaction did not begin */ }
+      this.db.close();
+      throw error;
     }
-    this.db.exec("PRAGMA user_version=1");
   }
 
   close(): void { this.db.close(); }
+  ready(): boolean { return this.db.prepare("SELECT 1 AS ok").get().ok === 1; }
 
   inspect(scope: string, tokens: number, settings: ProviderRateLimitSettings): LocalAdmission {
     return this.transaction(() => this.admission(scope, tokens, settings, false));
@@ -77,6 +86,7 @@ export class SqliteState {
 
   setAffinity(environment: string, callerId: string, alias: string, keyHash: string,
     provider: string, credentialScope: string, modelId: string): void {
+    this.db.prepare("DELETE FROM affinity WHERE expires_at <= ?").run(Date.now());
     this.db.prepare(`INSERT INTO affinity
       (environment, caller_id, alias, key_hash, provider, credential_scope, model_id, updated_at, expires_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -147,10 +157,23 @@ export class SqliteState {
       ON CONFLICT(scope, key) DO UPDATE SET value=excluded.value`).run(scope, key, Math.floor(value));
   }
   private transaction<T>(fn: () => T): T {
-    this.db.exec("BEGIN IMMEDIATE");
-    try { const result = fn(); this.db.exec("COMMIT"); return result; }
-    catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    try {
+      this.db.exec("BEGIN IMMEDIATE");
+      const result = fn();
+      this.db.exec("COMMIT");
+      return result;
+    }
+    catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction was not opened */ }
+      if (isBusy(error)) throw new RouterError("provider_unavailable", "SQLite state is temporarily busy; retry shortly.", 503, 100);
+      throw error;
+    }
   }
+}
+
+function isBusy(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && (error as { code?: unknown }).code
+    && ["ERR_SQLITE_BUSY", "SQLITE_BUSY", "SQLITE_LOCKED"].includes(String((error as { code: unknown }).code)));
 }
 
 function utcDay(now: number): string { return new Date(now).toISOString().slice(0, 10); }

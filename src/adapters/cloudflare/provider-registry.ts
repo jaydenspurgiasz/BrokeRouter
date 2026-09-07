@@ -14,7 +14,7 @@ export function registeredProviders(env: Env): RegisteredProvider[] {
     credentialScope: "default",
     models: NVIDIA_MODELS,
     rateLimits: nvidiaLimits,
-    invoke: (request, model) => invokeNvidia(request, model, env.NVIDIA_API_KEY!),
+    invoke: (request, model, signal) => invokeNvidia(request, model, env.NVIDIA_API_KEY!, signal),
   };
   const builtIns = env.NVIDIA_ENABLED === "false" || !env.NVIDIA_API_KEY ? [] : [nvidia];
   const agenticTest = env.AGENT_TEST_PROVIDER_ENABLED === "true";

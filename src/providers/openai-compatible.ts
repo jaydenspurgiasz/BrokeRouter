@@ -5,17 +5,18 @@ export interface RegisteredProvider {
   credentialScope: string;
   models: ModelProfile[];
   rateLimits: ProviderRateLimitSettings;
-  invoke(request: GenerationRequest, model: ModelProfile): Promise<Response>;
+  invoke(request: GenerationRequest, model: ModelProfile, signal?: AbortSignal): Promise<Response>;
 }
 
 export async function invokeOpenAiCompatible(
-  endpoint: string, apiKey: string, request: GenerationRequest, model: ModelProfile,
+  endpoint: string, apiKey: string, request: GenerationRequest, model: ModelProfile, signal?: AbortSignal,
 ): Promise<Response> {
   const { route: _route, model: _model, ...body } = request;
   return fetch(endpoint, {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", Accept: request.stream ? "text/event-stream" : "application/json" },
     body: JSON.stringify({ ...body, model: model.upstreamModel }),
+    signal,
   });
 }
 
@@ -76,7 +77,7 @@ export function configuredOpenAiCompatibleProviders(
       credentialScope: candidate.credentialScope ?? "default",
       models,
       rateLimits,
-      invoke: (request, model) => invokeOpenAiCompatible(candidate.endpoint, apiKey, request, model),
+        invoke: (request, model, signal) => invokeOpenAiCompatible(candidate.endpoint, apiKey, request, model, signal),
     }];
   });
 }
@@ -124,7 +125,7 @@ export function configuredProviderAccounts(
         credentialScope,
         models,
         rateLimits,
-        invoke: (request, model) => invokeOpenAiCompatible(value.endpoint, value.apiKey, request, model),
+        invoke: (request, model, signal) => invokeOpenAiCompatible(value.endpoint, value.apiKey, request, model, signal),
       }];
     });
 }

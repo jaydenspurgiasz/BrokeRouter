@@ -7,7 +7,8 @@
   "scripts": {
     "build": "node scripts/build-local.mjs",
     "start:local": "node dist/adapters/node/server.js",
-    "test:local": "node scripts/local-integration.mjs",
+    "test:local": "node scripts/local-integration.mjs && node scripts/build-local.mjs && node scripts/caller-fallback-regression.mjs",
+    "test:docker:oracle": "node scripts/docker-oracle-acceptance.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",

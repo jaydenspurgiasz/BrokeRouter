@@ -86,7 +86,12 @@ npm run start:local
 
 SQLite is stored at `BROKEROUTER_DATABASE_PATH` and uses WAL mode, atomic admission transactions,
 foreign keys, and a busy timeout. `compose.oracle.yml` runs the service as a non-root user with a
-read-only root filesystem and a persistent `/data` volume on an internal network.
+read-only root filesystem and a persistent `/data` volume. Before using that Compose file on Oracle,
+create the dedicated shared bridge once: `docker network create brokerouter-hermes-private`; attach
+Hermes to it as well. BrokeRouter publishes no host port, so Hermes reaches it only as
+`http://brokerouter:8787/v1` on that bridge, while the router retains outbound HTTPS access to its
+providers. The real `.env` is mounted as a Compose secret rather than copied into the image or
+exposed through container environment inspection.
 
 The native server reads `.env` automatically (or `BROKEROUTER_ENV_FILE`) and provider keys remain
 inside its process. The optional Wrangler runtime can instead use `.dev.vars` or Worker secrets.
