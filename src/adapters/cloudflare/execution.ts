@@ -1,16 +1,30 @@
 import type { Env } from "../../config";
-import { decidePolicy, type PolicyDecision, type PolicyMode, type RankedPolicyCandidate } from "../../core/adaptive-policy";
-import type { AvailableCandidate } from "../../core/policy";
+import type { PolicyDecision, PolicyMode } from "../../core/adaptive-policy";
+import { validateChatCompletion, type CompletionFailure } from "../../core/completion";
 import { selectRoutes } from "../../core/route";
 import { RouterError, type GenerationRequest, type ProviderRateLimitSettings, type RouteSelection } from "../../core/types";
 import { applyWorkflowContext, workflowContextKey, type WorkflowRecord } from "../../core/workflow";
 import { providerForModel, type RegisteredProvider } from "../../providers/openai-compatible";
-import type { AdmissionQuote, QuotaCoordinator, ReservationResult } from "./quota-coordinator";
+import type { QuotaCoordinator, ReservationResult } from "./quota-coordinator";
 import { optionalPositiveNumber, registeredProviders } from "./provider-registry";
-import type { CallOutcomeEvent, PolicyControl, RoutingDecisionEvent, RoutingState } from "./routing-state";
+import { routingCoordinator } from "./routing-coordinator-client";
+import type { RoutingCoordinator } from "./routing-coordinator";
+import type { CallOutcomeEvent, PolicyControl, RoutingDecisionEvent } from "./routing-state";
 import type { WorkflowCoordinator } from "./workflow-coordinator";
 
 type WaitUntil = (promise: Promise<unknown>) => void;
+type PhaseName = typeof PHASE_NAMES[number];
+type PhaseTimings = Partial<Record<PhaseName, number>>;
+
+const PHASE_NAMES = [
+  "br_workflow",
+  "br_caller_inspect",
+  "br_plan_reserve",
+  "br_caller_reserve",
+  "br_workflow_lease",
+  "br_inline_wait",
+  "br_normalize",
+] as const;
 
 export interface ExecutionIdentity {
   callerId: string;
@@ -21,13 +35,12 @@ export interface ExecutionIdentity {
 interface CandidateRuntime {
   selection: RouteSelection;
   provider: RegisteredProvider;
-  coordinator: DurableObjectStub<QuotaCoordinator>;
-  quote: AdmissionQuote;
   catalogOrder: number;
 }
 
 interface ReservedRuntime extends CandidateRuntime {
-  reservation: ReservationResult & { allowed: true; reservationId: string };
+  coordinator: DurableObjectStub<RoutingCoordinator>;
+  reservation: { reservationId: string };
   policy: PolicyDecision;
   reservationRank: number;
 }
@@ -37,11 +50,15 @@ export async function executeGeneration(
   generation: GenerationRequest,
   env: Env,
   waitUntil: WaitUntil,
-  options: { allowInlineWait?: boolean; identity?: ExecutionIdentity } = {},
+  options: { allowInlineWait?: boolean; identity?: ExecutionIdentity; requestStartedAt?: number } = {},
 ): Promise<Response> {
+  const requestStartedAt = options.requestStartedAt ?? performance.now();
+  let providerDurationMs = 0;
+  const phases: PhaseTimings = {};
   const identity = options.identity ?? { callerId: "system", environment: "development" };
   const routingState = env.ROUTING_STATE.getByName(identity.environment);
-  const workflowContext = await inspectWorkflow(generation, identity, env);
+  const providerCoordinator = routingCoordinator(env, identity.environment);
+  const workflowContext = await measurePhase(phases, "br_workflow", () => inspectWorkflow(generation, identity, env));
   const workflow = workflowContext?.workflow;
   const workflowCoordinator = workflowContext?.coordinator;
   const effectiveGeneration = workflow
@@ -49,107 +66,181 @@ export async function executeGeneration(
     : withoutUntrustedAffinity(generation);
   const providers = registeredProviders(env);
   const selections = selectRoutes(effectiveGeneration, providers.flatMap((provider) => provider.models));
-  const callerAdmission = await inspectCallerAdmission(identity, selections[0].reservedTokens, env);
-  const admission = await admitRankedRoute(
-    effectiveGeneration, selections, providers, env, routingState, identity,
-    options.allowInlineWait !== false,
-  );
-  const { selection, provider, coordinator, reservation, policy, reservationRank } = admission;
+  const callerAdmission = await measurePhase(phases, "br_caller_inspect", () => inspectCallerAdmission(
+    identity, Math.max(...selections.map((selection) => selection.reservedTokens)), env,
+  ));
   let callerReservation: (ReservationResult & { allowed: true; reservationId: string }) | undefined;
-  if (callerAdmission) {
-    const reserved = await callerAdmission.coordinator.reserve(selection.reservedTokens, callerAdmission.settings);
-    if (!reserved.allowed || !reserved.reservationId) {
-      await coordinator.recordOutcome(reservation.reservationId, { success: false, settings: provider.rateLimits });
-      throw new RouterError(
-        "caller_rate_limited", "Caller capacity changed before it could be reserved.", 429, reserved.retryAfterMs,
-      );
-    }
-    callerReservation = reserved as typeof reserved & { allowed: true; reservationId: string };
-  }
-  const decisionId = crypto.randomUUID();
   let workflowCallId: string | undefined;
-  try {
-    if (workflow && workflowCoordinator) {
-      const lease = await workflowCoordinator.beginCall(
-        workflow.id, identity.callerId, decisionId, provider.id, selection.model.id,
-      );
-      workflowCallId = lease.callId;
-    }
-  } catch (error) {
-    await coordinator.recordOutcome(reservation.reservationId, { success: false, settings: provider.rateLimits });
-    if (callerAdmission && callerReservation) {
-      await callerAdmission.coordinator.recordOutcome(callerReservation.reservationId, {
-        success: false, settings: callerAdmission.settings,
-      });
-    }
-    throw error;
-  }
-
-  const decisionEvent = decisionMetadata(
-    decisionId, effectiveGeneration, identity, workflow, admission, reservationRank,
-  );
-  waitUntil(routingState.recordDecision(decisionEvent));
-
-  const startedAt = Date.now();
-  let finalized = false;
-  const finalize = (result: {
-    success: boolean; status: number; actualTokens?: number; timeToFirstTokenMs?: number;
-    quotaSuccess: boolean; cooldown?: boolean; retryAfterMs?: number;
-  }): Promise<void> => {
-    if (finalized) return Promise.resolve();
-    finalized = true;
-    const completedAt = Date.now();
-    const tasks: Promise<unknown>[] = [
-      coordinator.recordOutcome(reservation.reservationId, {
-        success: result.quotaSuccess,
-        cooldown: result.cooldown,
-        actualTokens: result.actualTokens,
-        observation: result.cooldown ? { status: result.status, retryAfterMs: result.retryAfterMs } : undefined,
-        settings: provider.rateLimits,
-      }),
-      routingState.recordCallOutcome(callOutcome(
-        decisionId, identity, effectiveGeneration, provider.id, selection.model.id,
-        startedAt, completedAt, result,
-      )),
-    ];
+  let logicalFinalized = false;
+  let totalActualTokens = 0;
+  let consumedProviderCapacity = false;
+  const finalizeLogical = (success: boolean): void => {
+    if (logicalFinalized) return;
+    logicalFinalized = true;
+    const tasks: Promise<unknown>[] = [];
     if (callerAdmission && callerReservation) {
       tasks.push(callerAdmission.coordinator.recordOutcome(callerReservation.reservationId, {
-        success: result.quotaSuccess,
-        actualTokens: result.actualTokens,
+        success: consumedProviderCapacity,
+        actualTokens: totalActualTokens || undefined,
         settings: callerAdmission.settings,
       }));
     }
     if (workflowCallId && workflowCoordinator) {
-      tasks.push(workflowCoordinator.finishCall(workflowCallId, result.success, result.actualTokens));
+      tasks.push(workflowCoordinator.finishCall(workflowCallId, success, totalActualTokens || undefined));
     }
-    const completion = Promise.all(tasks).then(() => undefined);
-    waitUntil(completion);
-    return completion;
+    if (tasks.length) waitUntil(Promise.all(tasks));
   };
 
-  let upstream: Response;
-  try {
-    upstream = await provider.invoke(effectiveGeneration, selection.model);
-  } catch {
-    await finalize({ success: false, status: 502, quotaSuccess: false, cooldown: true });
-    throw new RouterError("upstream_error", `${provider.id} could not be reached.`, 502);
+  const excludedProviders = new Set<string>();
+  const attemptedProviders: string[] = [];
+  const providerCount = new Set(providers.map(providerKey)).size;
+  const maxAttempts = Math.min(providerCount, Math.max(1, Math.floor(optionalPositiveNumber(env.MAX_PROVIDER_ATTEMPTS) ?? 2)));
+  let lastFailure: Response | undefined;
+  let lastError: RouterError | undefined;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let admission: ReservedRuntime;
+    try {
+      admission = await admitRankedRoute(
+        effectiveGeneration, selections, providers, env, providerCoordinator, identity,
+        options.allowInlineWait !== false && attempt === 1, excludedProviders, phases,
+      );
+    } catch (error) {
+      if (attemptedProviders.length) break;
+      throw error;
+    }
+    const { selection, provider, coordinator, reservation, policy, reservationRank } = admission;
+    const currentProviderKey = providerKey(provider);
+    attemptedProviders.push(provider.id);
+    excludedProviders.add(currentProviderKey);
+
+    if (callerAdmission && !callerReservation) {
+      const reserved = await measurePhase(phases, "br_caller_reserve", () => callerAdmission.coordinator.reserve(
+        selection.reservedTokens, callerAdmission.settings,
+      ));
+      if (!reserved.allowed || !reserved.reservationId) {
+        await coordinator.recordProviderOutcome(currentProviderKey, reservation.reservationId, {
+          quotaSuccess: false, settings: provider.rateLimits,
+        });
+        throw new RouterError(
+          "caller_rate_limited", "Caller capacity changed before it could be reserved.", 429, reserved.retryAfterMs,
+        );
+      }
+      callerReservation = reserved as typeof reserved & { allowed: true; reservationId: string };
+    }
+
+    const decisionId = crypto.randomUUID();
+    try {
+      if (!workflowCallId && workflow && workflowCoordinator) {
+        const lease = await measurePhase(phases, "br_workflow_lease", () => workflowCoordinator.beginCall(
+          workflow.id, identity.callerId, decisionId, provider.id, selection.model.id,
+        ));
+        workflowCallId = lease.callId;
+      }
+    } catch (error) {
+      await coordinator.recordProviderOutcome(currentProviderKey, reservation.reservationId, {
+        quotaSuccess: false, settings: provider.rateLimits,
+      });
+      finalizeLogical(false);
+      throw error;
+    }
+
+    waitUntil(routingState.recordDecision(decisionMetadata(
+      decisionId, effectiveGeneration, identity, workflow, admission, reservationRank,
+    )));
+    const startedAt = Date.now();
+    let attemptFinalized = false;
+    const finalizeAttempt = (result: {
+      success: boolean; status: number; actualTokens?: number; timeToFirstTokenMs?: number;
+      quotaSuccess: boolean; cooldown?: boolean; retryAfterMs?: number;
+    }): void => {
+      if (attemptFinalized) return;
+      attemptFinalized = true;
+      const completedAt = Date.now();
+      const learning = callOutcome(
+        decisionId, identity, effectiveGeneration, provider.id, selection.model.id,
+        startedAt, completedAt, result,
+      );
+      waitUntil(Promise.all([
+        coordinator.recordProviderOutcome(currentProviderKey, reservation.reservationId, {
+          quotaSuccess: result.quotaSuccess,
+          cooldown: result.cooldown,
+          actualTokens: result.actualTokens,
+          observation: result.cooldown ? { status: result.status, retryAfterMs: result.retryAfterMs } : undefined,
+          settings: provider.rateLimits,
+          learning,
+        }),
+        routingState.recordCallOutcome(learning),
+      ]));
+    };
+
+    let upstream: Response;
+    const providerStartedAt = performance.now();
+    try {
+      upstream = await provider.invoke(effectiveGeneration, selection.model);
+    } catch {
+      providerDurationMs += performance.now() - providerStartedAt;
+      finalizeAttempt({ success: false, status: 502, quotaSuccess: false, cooldown: true });
+      lastError = new RouterError("upstream_error", `${provider.id} could not be reached.`, 502);
+      continue;
+    }
+    providerDurationMs += performance.now() - providerStartedAt;
+
+    if (!upstream.ok) {
+      const retryAfterMs = retryAfter(upstream);
+      finalizeAttempt({
+        success: false, status: upstream.status, quotaSuccess: false,
+        cooldown: upstream.status === 429 || upstream.status >= 500, retryAfterMs,
+      });
+      lastFailure = withAttemptHeaders(
+        passthrough(upstream, provider.id, selection.model.id, "upstream-error", policy.activePolicy),
+        attempt, attemptedProviders,
+      );
+      continue;
+    }
+
+    consumedProviderCapacity = true;
+    if (effectiveGeneration.stream) {
+      return withServerTiming(observedStream(
+        upstream, provider.id, selection.model.id, policy.activePolicy, startedAt,
+        (result) => {
+          if (result.actualTokens !== undefined) totalActualTokens += result.actualTokens;
+          finalizeAttempt(result);
+          finalizeLogical(result.success);
+        }, attempt, attemptedProviders,
+      ), requestStartedAt, providerDurationMs, "headers", phases);
+    }
+
+    const reason = attempt > 1 ? "fallback-selected" : "policy-selected";
+    const normalizationStartedAt = performance.now();
+    const sanitized = await sanitizeCompletion(upstream, provider.id, selection.model.id, reason, policy.activePolicy);
+    providerDurationMs += sanitized.providerBodyReadMs;
+    addPhase(phases, "br_normalize", Math.max(
+      0, performance.now() - normalizationStartedAt - sanitized.providerBodyReadMs,
+    ));
+    if (sanitized.actualTokens !== undefined) totalActualTokens += sanitized.actualTokens;
+    if (sanitized.valid) {
+      finalizeAttempt({ success: true, status: upstream.status, quotaSuccess: true, actualTokens: sanitized.actualTokens });
+      finalizeLogical(true);
+      return withServerTiming(
+        withAttemptHeaders(sanitized.response, attempt, attemptedProviders),
+        requestStartedAt,
+        providerDurationMs,
+        "complete",
+        phases,
+      );
+    }
+
+    finalizeAttempt({ success: false, status: upstream.status, quotaSuccess: true, actualTokens: sanitized.actualTokens });
+    lastFailure = semanticFailure(
+      provider.id, selection.model.id, policy.activePolicy, sanitized.failure ?? "empty_output",
+      attempt, attemptedProviders,
+    );
   }
 
-  if (!upstream.ok) {
-    const retryAfterMs = retryAfter(upstream);
-    await finalize({
-      success: false, status: upstream.status, quotaSuccess: false,
-      cooldown: upstream.status === 429 || upstream.status >= 500, retryAfterMs,
-    });
-    return passthrough(upstream, provider.id, selection.model.id, "upstream-error", policy.activePolicy);
-  }
-
-  if (effectiveGeneration.stream) {
-    return observedStream(upstream, provider.id, selection.model.id, policy.activePolicy, startedAt, finalize);
-  }
-  const sanitized = await sanitizeCompletion(upstream, provider.id, selection.model.id, policy.activePolicy);
-  await finalize({ success: true, status: upstream.status, quotaSuccess: true, actualTokens: sanitized.actualTokens });
-  return sanitized.response;
+  finalizeLogical(false);
+  if (lastFailure) return withServerTiming(lastFailure, requestStartedAt, providerDurationMs, "complete", phases);
+  throw lastError ?? new RouterError("upstream_error", "No provider returned a usable completion.", 502);
 }
 
 async function inspectCallerAdmission(
@@ -170,49 +261,56 @@ async function admitRankedRoute(
   selections: RouteSelection[],
   providers: RegisteredProvider[],
   env: Env,
-  routingState: DurableObjectStub<RoutingState>,
+  coordinator: DurableObjectStub<RoutingCoordinator>,
   identity: ExecutionIdentity,
   allowInlineWait: boolean,
+  excludedProviders: ReadonlySet<string> = new Set(),
+  phases: PhaseTimings = {},
 ): Promise<ReservedRuntime> {
-  const inspected = await inspectCandidates(selections, providers, env);
-  const available = inspected.filter((candidate) => candidate.quote.allowed);
-  const policyCandidates = available.map(toPolicyCandidate);
   const contextKey = workflowContextKey(request);
-  const planning = await routingState.getPlanningState({
+  const candidates = candidateRuntimes(selections, providers);
+  const planned = await measurePhase(phases, "br_plan_reserve", () => coordinator.planAndReserve({
+    request: {
+      model: request.model,
+      max_tokens: request.max_tokens,
+      stream: request.stream,
+      tools: request.tools,
+      route: request.route,
+    },
     callerId: identity.callerId,
     environment: identity.environment,
     contextKey,
-    candidates: policyCandidates.map((candidate) => ({
-      providerId: candidate.providerId, modelId: candidate.selection.model.id,
+    candidates: candidates.map((candidate) => ({
+      selection: candidate.selection,
+      providerId: candidate.provider.id,
+      credentialScope: candidate.provider.credentialScope,
+      rateLimits: candidate.provider.rateLimits,
+      catalogOrder: candidate.catalogOrder,
     })),
-  }, defaultPolicyControl(env));
-  const policy = decidePolicy(request, policyCandidates, planning.statistics, {
-    mode: planning.control.mode,
-    explorationRate: planning.control.explorationRate,
-    minObservations: planning.control.minObservations,
-    random: secureRandom,
-  });
+    excludedProviderKeys: [...excludedProviders],
+    defaultControl: defaultPolicyControl(env),
+  }));
 
-  for (let index = 0; index < policy.ranked.length; index += 1) {
-    const rankedCandidate = policy.ranked[index];
-    const candidate = available.find((item) => sameCandidate(item, rankedCandidate));
-    if (!candidate) continue;
-    const reservation = await candidate.coordinator.reserve(candidate.selection.reservedTokens, candidate.provider.rateLimits);
-    if (reservation.allowed && reservation.reservationId) {
-      return {
-        ...candidate,
-        reservation: reservation as ReservedRuntime["reservation"],
-        policy,
-        reservationRank: index,
-      };
-    }
+  if (planned.allowed && planned.reservation) {
+    const reserved = planned.reservation;
+    const candidate = candidates.find((item) => providerKey(item.provider) === providerKeyFromParts(
+      reserved.providerId, reserved.credentialScope,
+    ) && item.selection.model.id === reserved.modelId);
+    if (!candidate) throw new RouterError("provider_unavailable", "Coordinator selected an unknown route.", 503);
+    return {
+      ...candidate,
+      coordinator,
+      reservation: { reservationId: reserved.reservationId },
+      policy: reserved.policy,
+      reservationRank: reserved.reservationRank,
+    };
   }
 
-  const retryAfterMs = earliestRetry(inspected);
+  const retryAfterMs = planned.retryAfterMs;
   const inlineWait = allowInlineWait ? optionalPositiveNumber(env.MAX_INLINE_WAIT_MS) ?? 0 : 0;
   if (retryAfterMs !== undefined && retryAfterMs <= inlineWait) {
-    await sleep(retryAfterMs);
-    return admitRankedRoute(request, selections, providers, env, routingState, identity, false);
+    await measurePhase(phases, "br_inline_wait", () => sleep(retryAfterMs));
+    return admitRankedRoute(request, selections, providers, env, coordinator, identity, false, excludedProviders, phases);
   }
   throw new RouterError(
     "provider_unavailable",
@@ -239,23 +337,12 @@ function withoutUntrustedAffinity(request: GenerationRequest): GenerationRequest
   return { ...request, route };
 }
 
-async function inspectCandidates(
-  selections: RouteSelection[], providers: RegisteredProvider[], env: Env,
-): Promise<CandidateRuntime[]> {
-  const candidates = selections.flatMap((selection, catalogOrder): Omit<CandidateRuntime, "quote">[] => {
+function candidateRuntimes(selections: RouteSelection[], providers: RegisteredProvider[]): CandidateRuntime[] {
+  return selections.flatMap((selection, catalogOrder): CandidateRuntime[] => {
     const provider = providerForModel(providers, selection.model);
     if (!provider) return [];
-    return [{
-      selection,
-      provider,
-      coordinator: env.QUOTA_COORDINATOR.getByName(`${provider.id}:${provider.credentialScope}`),
-      catalogOrder,
-    }];
+    return [{ selection, provider, catalogOrder }];
   });
-  return Promise.all(candidates.map(async (candidate) => ({
-    ...candidate,
-    quote: await candidate.coordinator.inspect(candidate.selection.reservedTokens, candidate.provider.rateLimits),
-  })));
 }
 
 function decisionMetadata(
@@ -323,67 +410,119 @@ function callOutcome(
   };
 }
 
-function toPolicyCandidate(candidate: CandidateRuntime): AvailableCandidate {
-  return {
-    selection: candidate.selection,
-    providerId: candidate.provider.id,
-    credentialScope: candidate.provider.credentialScope,
-    availability: candidate.quote.snapshot,
-    catalogOrder: candidate.catalogOrder,
-  };
-}
-
-function sameCandidate(runtime: CandidateRuntime, policy: AvailableCandidate): boolean {
-  return runtime.provider.id === policy.providerId
-    && runtime.provider.credentialScope === policy.credentialScope
-    && runtime.selection.model.id === policy.selection.model.id;
-}
-
-function earliestRetry(candidates: CandidateRuntime[]): number | undefined {
-  const values = candidates.map((candidate) => candidate.quote.retryAfterMs)
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
-  return values.length ? Math.min(...values) : undefined;
-}
-
-async function observedStream(
+function observedStream(
   upstream: Response,
   provider: string,
   model: string,
   policy: string,
   startedAt: number,
   finalize: (result: {
-    success: boolean; status: number; quotaSuccess: boolean; timeToFirstTokenMs?: number;
-  }) => Promise<void>,
-): Promise<Response> {
+    success: boolean; status: number; quotaSuccess: boolean; timeToFirstTokenMs?: number; actualTokens?: number;
+  }) => void,
+  attempt: number,
+  attemptedProviders: string[],
+): Response {
   if (!upstream.body) {
-    await finalize({ success: true, status: upstream.status, quotaSuccess: true });
-    return passthrough(upstream, provider, model, "policy-selected", policy);
+    finalize({ success: false, status: upstream.status, quotaSuccess: true });
+    return withAttemptHeaders(passthrough(upstream, provider, model, "policy-selected", policy), attempt, attemptedProviders);
   }
   const reader = upstream.body.getReader();
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let pending = "";
+  let visibleOutput = false;
+  let truncated = false;
+  let actualTokens: number | undefined;
   let ttft: number | undefined;
   const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
         const chunk = await reader.read();
         if (chunk.done) {
-          await finalize({ success: true, status: upstream.status, quotaSuccess: true, timeToFirstTokenMs: ttft });
+          const tail = sanitizeSse(decoder.decode(), true);
+          if (tail.length) controller.enqueue(encoder.encode(tail));
+          finalize({
+            success: visibleOutput && !truncated,
+            status: upstream.status,
+            quotaSuccess: true,
+            timeToFirstTokenMs: ttft,
+            actualTokens,
+          });
           controller.close();
           return;
         }
-        ttft ??= Date.now() - startedAt;
-        controller.enqueue(chunk.value);
+        const output = sanitizeSse(decoder.decode(chunk.value, { stream: true }), false);
+        if (output.length) controller.enqueue(encoder.encode(output));
       } catch (error) {
-        await finalize({ success: false, status: 502, quotaSuccess: true, timeToFirstTokenMs: ttft });
+        finalize({ success: false, status: 502, quotaSuccess: true, timeToFirstTokenMs: ttft, actualTokens });
         controller.error(error);
       }
     },
     async cancel(reason) {
       await reader.cancel(reason);
-      await finalize({ success: false, status: 499, quotaSuccess: true, timeToFirstTokenMs: ttft });
+      finalize({ success: false, status: 499, quotaSuccess: true, timeToFirstTokenMs: ttft, actualTokens });
     },
   });
+
+  function sanitizeSse(text: string, flush: boolean): string {
+    pending += text;
+    const lines = pending.split("\n");
+    if (!flush) pending = lines.pop() ?? "";
+    else pending = "";
+    if (lines.length === 0 || (flush && lines.length === 1 && lines[0] === "")) return "";
+    return `${lines.map(sanitizeSseLine).join("\n")}\n`;
+  }
+
+  function sanitizeSseLine(rawLine: string): string {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    const match = /^(\s*data:\s*)(.*)$/.exec(line);
+    if (!match || match[2] === "[DONE]" || !match[2]) return line;
+    try {
+      const payload = JSON.parse(match[2]) as Record<string, unknown>;
+      const usage = record(payload.usage);
+      if (typeof usage?.total_tokens === "number") actualTokens = Math.max(0, usage.total_tokens);
+      if (Array.isArray(payload.choices)) {
+        for (const item of payload.choices) {
+          const choice = record(item);
+          if (!choice) continue;
+          if (choice.finish_reason === "length") truncated = true;
+          for (const field of ["delta", "message"] as const) {
+            const message = record(choice[field]);
+            if (!message) continue;
+            delete message.reasoning;
+            delete message.reasoning_content;
+            if (streamMessageHasOutput(message)) {
+              visibleOutput = true;
+              ttft ??= Date.now() - startedAt;
+            }
+          }
+        }
+      }
+      return `${match[1]}${JSON.stringify(payload)}`;
+    } catch {
+      return line;
+    }
+  }
+
   const headers = routedHeaders(upstream.headers, provider, model, "policy-selected", policy);
-  return new Response(body, { status: upstream.status, statusText: upstream.statusText, headers });
+  return withAttemptHeaders(
+    new Response(body, { status: upstream.status, statusText: upstream.statusText, headers }),
+    attempt,
+    attemptedProviders,
+  );
+}
+
+function streamMessageHasOutput(message: Record<string, unknown>): boolean {
+  return (typeof message.content === "string" && message.content.length > 0)
+    || (typeof message.refusal === "string" && message.refusal.length > 0)
+    || (Array.isArray(message.tool_calls) && message.tool_calls.length > 0)
+    || Boolean(record(message.function_call));
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
 }
 
 function sleep(milliseconds: number): Promise<void> {
@@ -415,11 +554,26 @@ function passthrough(upstream: Response, provider: string, model: string, reason
 }
 
 async function sanitizeCompletion(
-  upstream: Response, provider: string, model: string, policy: string,
-): Promise<{ response: Response; actualTokens?: number }> {
-  const headers = routedHeaders(upstream.headers, provider, model, "policy-selected", policy);
+  upstream: Response, provider: string, model: string, reason: string, policy: string,
+): Promise<{
+  response: Response; actualTokens?: number; valid: boolean; failure?: CompletionFailure; providerBodyReadMs: number;
+}> {
+  const headers = routedHeaders(upstream.headers, provider, model, reason, policy);
+  const bodyStartedAt = performance.now();
+  let body: string;
   try {
-    const payload = await upstream.clone().json<Record<string, unknown>>();
+    body = await upstream.clone().text();
+  } catch {
+    return {
+      response: passthrough(upstream, provider, model, reason, policy),
+      valid: false,
+      failure: "empty_output",
+      providerBodyReadMs: performance.now() - bodyStartedAt,
+    };
+  }
+  const providerBodyReadMs = performance.now() - bodyStartedAt;
+  try {
+    const payload = JSON.parse(body) as Record<string, unknown>;
     const choices = payload.choices;
     if (Array.isArray(choices)) {
       for (const choice of choices) {
@@ -432,16 +586,106 @@ async function sanitizeCompletion(
     }
     const usage = payload.usage && typeof payload.usage === "object" ? payload.usage as Record<string, unknown> : undefined;
     const actualTokens = typeof usage?.total_tokens === "number" ? Math.max(0, usage.total_tokens) : undefined;
+    const validation = validateChatCompletion(payload);
     headers.set("content-type", "application/json");
     headers.delete("content-length");
     headers.delete("content-encoding");
     return {
       response: new Response(JSON.stringify(payload), { status: upstream.status, statusText: upstream.statusText, headers }),
       actualTokens,
+      providerBodyReadMs,
+      ...validation,
     };
   } catch {
-    return { response: passthrough(upstream, provider, model, "policy-selected", policy) };
+    return {
+      response: new Response(body, {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers: routedHeaders(upstream.headers, provider, model, reason, policy),
+      }),
+      valid: false,
+      failure: "empty_output",
+      providerBodyReadMs,
+    };
   }
+}
+
+function semanticFailure(
+  provider: string,
+  model: string,
+  policy: string,
+  failure: CompletionFailure,
+  attempt: number,
+  attemptedProviders: string[],
+): Response {
+  const message = failure === "truncated_output"
+    ? "Provider exhausted the output-token budget before completing a usable answer."
+    : "Provider returned no usable visible content or tool call.";
+  const headers = routedHeaders(new Headers({ "content-type": "application/json" }), provider, model, "semantic-invalid", policy);
+  const response = new Response(JSON.stringify({
+    error: { message, type: "invalid_upstream_response", code: failure },
+  }), { status: 502, headers });
+  return withAttemptHeaders(response, attempt, attemptedProviders);
+}
+
+function withAttemptHeaders(response: Response, attempt: number, attemptedProviders: string[]): Response {
+  const headers = new Headers(response.headers);
+  headers.set("x-broke-router-attempts", String(attempt));
+  if (attemptedProviders.length > 1) {
+    headers.set("x-broke-router-fallback-from", attemptedProviders.slice(0, -1).join(","));
+  }
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+function withServerTiming(
+  response: Response,
+  requestStartedAt: number,
+  providerDurationMs: number,
+  providerMeasurement: "headers" | "complete",
+  phases: PhaseTimings,
+): Response {
+  const serverDurationMs = Math.max(0, performance.now() - requestStartedAt);
+  const boundedProviderMs = Math.max(0, Math.min(serverDurationMs, providerDurationMs));
+  const routerDurationMs = Math.max(0, serverDurationMs - boundedProviderMs);
+  const headers = new Headers(response.headers);
+  const measuredRouterPhasesMs = PHASE_NAMES.reduce((total, name) => total + (phases[name] ?? 0), 0);
+  const otherDurationMs = Math.max(0, routerDurationMs - measuredRouterPhasesMs);
+  const timing = [
+    `br_provider;dur=${timingValue(boundedProviderMs)}`,
+    `br_router;dur=${timingValue(routerDurationMs)}`,
+    `br_total;dur=${timingValue(serverDurationMs)}`,
+    ...PHASE_NAMES.map((name) => `${name};dur=${timingValue(phases[name] ?? 0)}`),
+    `br_other;dur=${timingValue(otherDurationMs)}`,
+  ].join(", ");
+  const existing = headers.get("server-timing");
+  headers.set("server-timing", existing ? `${existing}, ${timing}` : timing);
+  headers.set("x-broke-router-provider-timing", providerMeasurement);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+async function measurePhase<T>(phases: PhaseTimings, name: PhaseName, operation: () => Promise<T>): Promise<T> {
+  const startedAt = performance.now();
+  try {
+    return await operation();
+  } finally {
+    addPhase(phases, name, performance.now() - startedAt);
+  }
+}
+
+function addPhase(phases: PhaseTimings, name: PhaseName, durationMs: number): void {
+  phases[name] = (phases[name] ?? 0) + Math.max(0, durationMs);
+}
+
+function timingValue(value: number): string {
+  return value.toFixed(3);
+}
+
+function providerKey(provider: Pick<RegisteredProvider, "id" | "credentialScope">): string {
+  return `${provider.id}:${provider.credentialScope}`;
+}
+
+function providerKeyFromParts(providerId: string, credentialScope: string): string {
+  return `${providerId}:${credentialScope}`;
 }
 
 function routedHeaders(source: Headers, provider: string, model: string, reason: string, policy: string): Headers {
@@ -469,11 +713,6 @@ function numericSetting(value: string | undefined, fallback: number): number {
 }
 function positive(value: number | undefined, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
-}
-function secureRandom(): number {
-  const value = new Uint32Array(1);
-  crypto.getRandomValues(value);
-  return value[0] / 0x1_0000_0000;
 }
 function hasLimits(settings: ProviderRateLimitSettings): boolean {
   return settings.dailySafetyBudgetTokens > 0 || Boolean(settings.requests || settings.tokens || settings.maxConcurrent);

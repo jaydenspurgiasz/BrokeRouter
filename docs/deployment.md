@@ -81,6 +81,11 @@ Wrangler prints a URL similar to `https://broke-router.<account-subdomain>.worke
 your `BROKE_ROUTER_URL`. The deploy also creates the five Durable Object bindings and runs the
 versioned SQLite migrations.
 
+Migration `v4` creates a fresh Routing Coordinator. Its versioned object key is first instantiated
+with a best-effort `wnam` location hint, avoiding reuse of the earlier quota/policy objects whose
+placement may have been determined by VPN traffic. The migration intentionally starts new provider
+quota and online-policy counters; deploy only when no old-version requests remain in flight.
+
 ## 4. Upload secrets
 
 ```powershell

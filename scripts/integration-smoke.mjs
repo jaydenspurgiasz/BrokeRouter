@@ -62,7 +62,7 @@ if (!rateFallbackMode) await check("instant policy control and rollback", async 
 if (rateFallbackMode) {
   await check("automatic NVIDIA rate-limit fallback to Gemini", async () => {
     const request = {
-      model: "free/default", messages: [{ role: "user", content: "Reply with exactly OK." }], max_tokens: 80,
+      model: "free/default", messages: [{ role: "user", content: "Reply with exactly OK." }], max_tokens: 512,
     };
     const first = await call("/v1/chat/completions", request);
     assert.equal(first.response.headers.get("x-broke-router-provider"), "nvidia", "First free/default call must use NVIDIA");
@@ -86,7 +86,7 @@ if (rateFallbackMode) {
 
 await check("forced NVIDIA route", async () => {
   const { response, json } = await call("/v1/chat/completions", {
-    model: "nvidia/openai/gpt-oss-20b", messages: [{ role: "user", content: "Reply with exactly OK." }], max_tokens: 200,
+    model: "nvidia/openai/gpt-oss-20b", messages: [{ role: "user", content: "Reply with exactly OK." }], max_tokens: 512,
   });
   assert.equal(response.headers.get("x-broke-router-provider"), "nvidia");
   assert.ok(json.choices?.[0]?.message?.content, "NVIDIA returned no visible content");
@@ -105,7 +105,7 @@ await check("forced Gemini route", async () => {
 await check("NVIDIA reasoning is not leaked", async () => {
   const { json } = await call("/v1/chat/completions", {
     model: "nvidia/openai/gpt-oss-20b", route: { reasoning: "on" },
-    messages: [{ role: "user", content: "What is 17 times 19? Answer only." }], max_tokens: 300,
+    messages: [{ role: "user", content: "What is 17 times 19? Answer only." }], max_tokens: 1_024,
   });
   const message = json.choices?.[0]?.message ?? {};
   assert.equal(message.reasoning, undefined);
@@ -116,12 +116,14 @@ await check("NVIDIA reasoning is not leaked", async () => {
 await check("SSE streaming", async () => {
   const response = await fetch(`${baseUrl}/v1/chat/completions`, {
     method: "POST", headers,
-    body: JSON.stringify({ model: "nvidia/openai/gpt-oss-20b", stream: true, messages: [{ role: "user", content: "Say hello." }], max_tokens: 80 }),
+    body: JSON.stringify({ model: "nvidia/openai/gpt-oss-20b", stream: true, messages: [{ role: "user", content: "Say hello." }], max_tokens: 512 }),
   });
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /text\/event-stream/);
   const text = await response.text();
   assert.match(text, /data:/, "Expected SSE data frames");
+  assert.doesNotMatch(text, /reasoning_content|\"reasoning\"\s*:/, "Streaming reasoning was leaked");
+  assert.match(text, /\"content\"\s*:\s*\"[^\"]+/, "Streaming response had no visible content");
 });
 
 await check("durable workflow lifecycle and learned statistics", async () => {
@@ -207,7 +209,7 @@ await check("durable workflow deadline alarm", async () => {
 
 await check("durable async job", async () => {
   const { json: queued } = await call("/v1/jobs", {
-    model: "nvidia/openai/gpt-oss-20b", messages: [{ role: "user", content: "Reply with exactly ASYNC OK." }], max_tokens: 200,
+    model: "nvidia/openai/gpt-oss-20b", messages: [{ role: "user", content: "Reply with exactly ASYNC OK." }], max_tokens: 512,
   });
   assert.equal(queued.status, "queued");
   assert.ok(queued.id);

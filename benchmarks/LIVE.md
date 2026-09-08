@@ -26,6 +26,11 @@ Defaults:
 - p50, p95, p99, standard deviation, and 95% confidence interval data.
 - Cloudflare colo counts from `CF-Ray`.
 - Routing provider/policy distribution.
+- Semantic completion validation plus automatic-fallback counts for optional real-provider samples.
+- Per-request `Server-Timing` decomposition: provider round trip, BrokeRouter-only execution,
+  Worker total, client/Cloudflare residual, and end-to-end minus provider latency.
+- Critical-path phase timing for the single atomic plan-and-reserve coordinator RPC, caller quotas,
+  workflow coordination, inline waiting, and response normalization.
 - Decision/outcome persistence reconciliation.
 - No real LLM calls.
 

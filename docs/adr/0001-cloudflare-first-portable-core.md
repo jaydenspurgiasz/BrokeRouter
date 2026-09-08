@@ -1,6 +1,6 @@
 # ADR 0001: Cloudflare-first deployment, portable routing core
 
-**Status:** Accepted
+**Status:** Accepted; provider-coordinator topology superseded by ADR 0005
 
 ## Context
 

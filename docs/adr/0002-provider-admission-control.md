@@ -1,6 +1,6 @@
 # ADR 0002: Credential-scoped provider admission control
 
-**Status:** Accepted
+**Status:** Superseded by ADR 0005; admission rules remain accepted
 
 ## Context
 

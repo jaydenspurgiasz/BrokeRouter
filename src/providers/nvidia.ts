@@ -8,8 +8,23 @@ export async function invokeNvidia(
   apiKey: string,
   signal?: AbortSignal,
 ): Promise<Response> {
-  const { route: _route, model: _model, ...body } = request;
-  const callerTemplateOptions = asRecord(body.chat_template_kwargs);
+  const {
+    route: _route,
+    model: _model,
+    chat_template_kwargs: rawTemplateOptions,
+    reasoning_effort: _rawReasoningEffort,
+    ...body
+  } = request;
+  const callerTemplateOptions = asRecord(rawTemplateOptions);
+  const isGptOss = model.upstreamModel.startsWith("openai/gpt-oss-");
+  const reasoningControls = isGptOss
+    ? { reasoning_effort: request.route?.reasoning === "on" ? "high" : "low" }
+    : {
+        chat_template_kwargs: {
+          ...callerTemplateOptions,
+          enable_thinking: request.route?.reasoning === "on",
+        },
+      };
   return fetch(NVIDIA_CHAT_COMPLETIONS, {
     method: "POST",
     headers: {
@@ -20,12 +35,9 @@ export async function invokeNvidia(
     body: JSON.stringify({
       ...body,
       model: model.upstreamModel,
-      // NVIDIA reasoning can consume the whole output allowance. It is opt-in through the router,
-      // rather than an accidental consequence of a provider default.
-      chat_template_kwargs: {
-        ...callerTemplateOptions,
-        enable_thinking: request.route?.reasoning === "on",
-      },
+      // GPT-OSS exposes reasoning_effort rather than an off switch. Keep the default at the
+      // provider's minimum and rely on the semantic output gate if reasoning exhausts the budget.
+      ...reasoningControls,
     }),
     signal,
   });

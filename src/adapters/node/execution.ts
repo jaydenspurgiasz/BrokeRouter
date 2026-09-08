@@ -1,4 +1,5 @@
 import { selectRoutes } from "../../core/route";
+import { validateChatCompletion } from "../../core/completion";
 import { RouterError, type GenerationRequest, type ProviderRateLimitSettings } from "../../core/types";
 import { providerForModel, type RegisteredProvider } from "../../providers/openai-compatible";
 import { SqliteState } from "./sqlite-state";
@@ -94,17 +95,25 @@ export async function executeLocalGeneration(
       settleCaller(false);
       return routed(upstream, provider.id, selection.model.id);
     }
-    if (affinityHash) state.setAffinity(identity.environment, identity.callerId, alias, affinityHash,
-      provider.id, provider.credentialScope, selection.model.id);
     const finalize = (success: boolean, actualTokens?: number) => {
       state.settle(providerScope, providerReservation.reservationId!, { success, actualTokens, settings: provider.rateLimits });
       settleCaller(success, actualTokens);
+      // Do not turn an unusable or interrupted answer into future affinity.
+      if (success && affinityHash) state.setAffinity(identity.environment, identity.callerId, alias, affinityHash,
+        provider.id, provider.credentialScope, selection.model.id);
     };
     if (request.stream) return routed(streamWithFinalizer(upstream, finalize, clearDeadline), provider.id, selection.model.id);
     const normalized = await sanitize(upstream);
     clearDeadline();
-    finalize(true, normalized.actualTokens);
-    return routed(normalized.response, provider.id, selection.model.id);
+    if (normalized.valid) {
+      finalize(true, normalized.actualTokens);
+      return routed(normalized.response, provider.id, selection.model.id);
+    }
+    state.settle(providerScope, providerReservation.reservationId, {
+      success: false, actualTokens: normalized.actualTokens, settings: provider.rateLimits,
+    });
+    lastStatus = 502;
+    continue;
   }
   settleCaller(false);
   throw new RouterError("provider_unavailable", `All eligible provider accounts are unavailable (last upstream status ${lastStatus}).`, 503, retryAfterMs);
@@ -135,20 +144,56 @@ function routed(response: Response, provider: string, model: string): Response {
   headers.set("x-broke-router-route", "local-sqlite");
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
-function streamWithFinalizer(response: Response, finalize: (success: boolean) => void, clearDeadline: () => void): Response {
-  if (!response.body) { clearDeadline(); finalize(true); return response; }
-  const reader = response.body.getReader(); let done = false;
-  const finish = (success: boolean) => { if (!done) { done = true; clearDeadline(); finalize(success); } };
+function streamWithFinalizer(response: Response, finalize: (success: boolean, actualTokens?: number) => void, clearDeadline: () => void): Response {
+  if (!response.body) { clearDeadline(); finalize(false); return response; }
+  const reader = response.body.getReader(); const decoder = new TextDecoder(); const encoder = new TextEncoder();
+  let done = false; let pending = ""; let visible = false; let truncated = false; let actualTokens: number | undefined;
+  const finish = (success: boolean) => { if (!done) { done = true; clearDeadline(); finalize(success, actualTokens); } };
   const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
-      try { const chunk = await reader.read(); if (chunk.done) { finish(true); controller.close(); } else controller.enqueue(chunk.value); }
+      try {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          const tail = sanitize(decoder.decode(), true); if (tail) controller.enqueue(encoder.encode(tail));
+          finish(visible && !truncated); controller.close();
+        } else {
+          const output = sanitize(decoder.decode(chunk.value, { stream: true }), false);
+          if (output) controller.enqueue(encoder.encode(output));
+        }
+      }
       catch (error) { finish(false); controller.error(error); }
     },
     async cancel(reason) { await reader.cancel(reason); finish(false); },
   });
+  function sanitize(text: string, flush: boolean): string {
+    pending += text; const lines = pending.split("\n"); pending = flush ? "" : (lines.pop() ?? "");
+    return lines.map((raw) => {
+      const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+      const match = /^(\s*data:\s*)(.*)$/.exec(line);
+      if (!match || !match[2] || match[2] === "[DONE]") return line;
+      try {
+        const payload = JSON.parse(match[2]) as Record<string, unknown>;
+        const usage = payload.usage as Record<string, unknown> | undefined;
+        if (typeof usage?.total_tokens === "number") actualTokens = Math.max(0, usage.total_tokens);
+        if (Array.isArray(payload.choices)) for (const item of payload.choices) {
+          const choice = item as Record<string, unknown>; if (choice.finish_reason === "length") truncated = true;
+          for (const field of ["delta", "message"]) {
+            const message = choice[field] as Record<string, unknown> | undefined;
+            if (!message) continue;
+            delete message.reasoning; delete message.reasoning_content;
+            if ((typeof message.content === "string" && message.content.length > 0)
+              || (typeof message.refusal === "string" && message.refusal.length > 0)
+              || (Array.isArray(message.tool_calls) && message.tool_calls.length > 0)
+              || Boolean(message.function_call)) visible = true;
+          }
+        }
+        return `${match[1]}${JSON.stringify(payload)}`;
+      } catch { return line; }
+    }).join("\n") + (lines.length ? "\n" : "");
+  }
   return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
-async function sanitize(response: Response): Promise<{ response: Response; actualTokens?: number }> {
+async function sanitize(response: Response): Promise<{ response: Response; actualTokens?: number; valid: boolean }> {
   try {
     const payload = await response.clone().json() as Record<string, any>;
     for (const choice of Array.isArray(payload.choices) ? payload.choices : []) {
@@ -157,8 +202,8 @@ async function sanitize(response: Response): Promise<{ response: Response; actua
     const actualTokens = typeof payload.usage?.total_tokens === "number" ? payload.usage.total_tokens : undefined;
     const headers = new Headers(response.headers); headers.set("content-type", "application/json");
     headers.delete("content-length"); headers.delete("content-encoding");
-    return { response: new Response(JSON.stringify(payload), { status: response.status, headers }), actualTokens };
-  } catch { return { response }; }
+    return { response: new Response(JSON.stringify(payload), { status: response.status, headers }), actualTokens, valid: validateChatCompletion(payload).valid };
+  } catch { return { response, valid: false }; }
 }
 async function hmacHex(secret: string, value: string): Promise<string> {
   const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);

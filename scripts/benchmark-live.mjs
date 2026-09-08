@@ -23,6 +23,16 @@ const benchmarkBody = JSON.stringify({
   messages: [{ role: "user", content: "server benchmark" }],
   max_tokens: 16,
 });
+const routerPhases = [
+  ["Workflow lookup", "br_workflow"],
+  ["Caller quota inspect", "br_caller_inspect"],
+  ["Atomic plan + reserve RPC", "br_plan_reserve"],
+  ["Caller quota reserve", "br_caller_reserve"],
+  ["Workflow lease", "br_workflow_lease"],
+  ["Intentional inline wait", "br_inline_wait"],
+  ["Response normalization", "br_normalize"],
+  ["Unattributed router work", "br_other"],
+];
 
 console.log(`BrokeRouter live benchmark: ${baseUrl}`);
 console.log(`${requestsPerRun} requests x ${repeats} repeats at concurrency ${concurrencyLevels.join(", ")}`);
@@ -108,15 +118,50 @@ async function single(url, init) {
   const started = performance.now();
   const response = await fetch(url, { ...init, signal: AbortSignal.timeout(30_000) });
   const body = await response.arrayBuffer();
+  const latencyMs = performance.now() - started;
+  const serverTimingHeader = response.headers.get("server-timing") ?? undefined;
+  const serverTiming = parseServerTiming(serverTimingHeader);
+  const workerLatencyMs = serverTiming.br_total;
+  const providerLatencyMs = serverTiming.br_provider;
+  const routerLatencyMs = serverTiming.br_router;
+  let completionValid;
+  let finishReason;
+  if (response.headers.get("content-type")?.includes("application/json")) {
+    try {
+      const payload = JSON.parse(new TextDecoder().decode(body));
+      if (Array.isArray(payload.choices)) {
+        const choice = payload.choices[0] ?? {};
+        const message = choice.message ?? {};
+        const visible = (typeof message.content === "string" && message.content.trim().length > 0)
+          || (typeof message.refusal === "string" && message.refusal.trim().length > 0)
+          || (Array.isArray(message.tool_calls) && message.tool_calls.length > 0)
+          || Boolean(message.function_call);
+        finishReason = choice.finish_reason;
+        completionValid = visible && finishReason !== "length";
+      }
+    } catch { /* Non-completion JSON endpoints are measured without semantic fields. */ }
+  }
   return {
-    latencyMs: performance.now() - started,
+    latencyMs,
     status: response.status,
     bytes: body.byteLength,
     provider: response.headers.get("x-broke-router-provider") ?? undefined,
+    route: response.headers.get("x-broke-router-route") ?? undefined,
+    attempts: Number(response.headers.get("x-broke-router-attempts")) || undefined,
+    fallbackFrom: response.headers.get("x-broke-router-fallback-from") ?? undefined,
     policy: response.headers.get("x-broke-router-policy") ?? undefined,
     cfRay: response.headers.get("cf-ray") ?? undefined,
     colo: colo(response.headers.get("cf-ray")),
-    serverTiming: response.headers.get("server-timing") ?? undefined,
+    serverTiming: serverTimingHeader,
+    serverTimingMetrics: serverTiming,
+    providerTimingMeasurement: response.headers.get("x-broke-router-provider-timing") ?? undefined,
+    workerLatencyMs,
+    providerLatencyMs,
+    routerLatencyMs,
+    clientCloudflareLatencyMs: finite(workerLatencyMs) ? Math.max(0, latencyMs - workerLatencyMs) : undefined,
+    totalMinusProviderLatencyMs: finite(providerLatencyMs) ? Math.max(0, latencyMs - providerLatencyMs) : undefined,
+    completionValid,
+    finishReason,
   };
 }
 
@@ -125,6 +170,9 @@ function mergeRuns(name, concurrency, runs) {
   const wallMs = runs.reduce((sum, run) => sum + run.wallMs, 0);
   const completed = samples.filter((sample) => !sample.transportError);
   const successful = completed.filter((sample) => sample.status < 400);
+  const semanticFailures = successful.filter((sample) => sample.completionValid === false).length;
+  const timed = successful.filter((sample) => finite(sample.workerLatencyMs)
+    && finite(sample.providerLatencyMs) && finite(sample.routerLatencyMs));
   return {
     name, concurrency, repeats: runs.length, requests: samples.length, successful: successful.length,
     errors: samples.length - successful.length,
@@ -132,8 +180,23 @@ function mergeRuns(name, concurrency, runs) {
     completedRequestsPerSecond: completed.length / (wallMs / 1_000),
     successfulRequestsPerSecond: successful.length / (wallMs / 1_000),
     latencyMs: summarize(completed.map((sample) => sample.latencyMs)),
+    timingCoverage: { measured: timed.length, successful: successful.length },
+    componentLatencyMs: {
+      provider: summarize(timed.map((sample) => sample.providerLatencyMs)),
+      router: summarize(timed.map((sample) => sample.routerLatencyMs)),
+      workerTotal: summarize(timed.map((sample) => sample.workerLatencyMs)),
+      clientCloudflare: summarize(timed.map((sample) => sample.clientCloudflareLatencyMs)),
+      totalMinusProvider: summarize(timed.map((sample) => sample.totalMinusProviderLatencyMs)),
+      phases: Object.fromEntries(routerPhases.map(([, key]) => [
+        key,
+        summarize(timed.map((sample) => sample.serverTimingMetrics?.[key]).filter(finite)),
+      ])),
+    },
     statusCounts: counts(completed.map((sample) => String(sample.status))),
     providers: counts(successful.map((sample) => sample.provider).filter(Boolean)),
+    routes: counts(successful.map((sample) => sample.route).filter(Boolean)),
+    fallbacks: successful.filter((sample) => sample.fallbackFrom).length,
+    semanticFailures,
     policies: counts(successful.map((sample) => sample.policy).filter(Boolean)),
     colos: counts(successful.map((sample) => sample.colo).filter(Boolean)),
     runSuccessfulRequestsPerSecond: runs.map((run) => {
@@ -188,11 +251,14 @@ async function runStreaming(count, concurrency, repeatCount) {
 async function runRealProvider(count) {
   console.log(`Measuring ${count} quota-consuming free/default calls...`);
   const body = JSON.stringify({
-    model: "free/default", messages: [{ role: "user", content: "Reply with exactly OK." }], max_tokens: 24,
+    model: "free/default", messages: [{ role: "user", content: "Reply with exactly OK." }], max_tokens: 200,
   });
   const result = await runRepeated("real-provider", `${baseUrl}/v1/chat/completions`, {
     method: "POST", headers: jsonHeaders, body,
   }, count, 1, 1);
+  assert.equal(result.semanticFailures, 0, "A real provider returned HTTP 200 without a complete visible answer");
+  assert.equal(result.timingCoverage.measured, result.successful,
+    "Provider timing is missing. Redeploy the instrumented Worker before running real-provider metrics.");
   return result;
 }
 
@@ -227,15 +293,25 @@ function buildReport(metrics) {
     routerP95Ms: router.latencyMs.p95,
     routerP99Ms: router.latencyMs.p99,
     medianApplicationPathMs: Math.max(0, router.latencyMs.p50 - metrics.health[index].latencyMs.p50),
+    measuredRouterP50Ms: router.componentLatencyMs.router.p50,
+    measuredWorkerP50Ms: router.componentLatencyMs.workerTotal.p50,
+    clientCloudflareP50Ms: router.componentLatencyMs.clientCloudflare.p50,
     errorRate: router.errorRate,
   }));
   return {
-    schemaVersion: 1, generatedAt: new Date().toISOString(), gitCommit: commit, target: baseUrl,
+    schemaVersion: 2, generatedAt: new Date().toISOString(), gitCommit: commit, target: baseUrl,
     methodology: {
       type: "closed-loop deployed end-to-end server-path load test",
       requestsPerRun, repeats, concurrencyLevels,
       includes: ["client network", "Cloudflare edge", "Access when configured", "Worker authentication", "routing gates", "Durable Object RPC", "SQLite", "policy", "telemetry", "response normalization"],
       excludes: ["LLM inference for benchmark/echo", "provider Internet latency for benchmark/echo"],
+      timingDefinitions: {
+        endToEnd: "Client-observed request start through full response body.",
+        provider: "Worker outbound provider invocation through full non-streaming response body; includes Cloudflare-to-provider network and provider service/inference.",
+        router: "Worker request handling excluding measured provider duration; includes authentication, routing, Durable Object RPC, quota, policy, and normalization.",
+        clientCloudflare: "Per-request end-to-end minus Worker total; includes client network, Cloudflare ingress/egress, scheduling before Worker execution, and response transfer.",
+        totalMinusProvider: "Per-request end-to-end minus provider duration; equals router plus client/Cloudflare residual.",
+      },
       realProviderRequests: realRequests,
     },
     system: { platform: platform(), release: release(), architecture: process.arch, node: process.version, cpuModel: cpus()[0]?.model ?? "unknown" },
@@ -266,14 +342,36 @@ function renderMarkdown(report) {
   const h = report.headline;
   const rows = report.routingCurve.map((row) => `| ${row.concurrency} | ${fmt(row.edgeHealthRequestsPerSecond)} | ${fmt(row.routerRequestsPerSecond)} | ${fmt(row.healthP50Ms)} | ${fmt(row.routerP50Ms)} | ${fmt(row.routerP95Ms)} | ${fmt(row.routerP99Ms)} | ${fmt(row.medianApplicationPathMs)} | ${(row.errorRate * 100).toFixed(2)}% |`).join("\n");
   const real = report.scenarios.realProvider
-    ? `\n## Real-provider sample\n\n- Requests: ${report.scenarios.realProvider.requests}; errors: ${report.scenarios.realProvider.errors}.\n- Providers: \`${JSON.stringify(report.scenarios.realProvider.providers)}\`.\n- Latency: ${fmt(report.scenarios.realProvider.latencyMs.p50)} ms p50, ${fmt(report.scenarios.realProvider.latencyMs.p95)} ms p95.\n`
+    ? realProviderMarkdown(report.scenarios.realProvider)
     : "\n## Real-provider sample\n\nSkipped by default. Set `BROKE_LIVE_REAL_REQUESTS` to a small positive number to spend provider quota deliberately.\n";
   return `# BrokeRouter deployed benchmark\n\nGenerated ${report.generatedAt} against ${report.target} from commit \`${report.gitCommit}\`.\n\n## Headline metrics\n\n- Peak successful server-path throughput within a 1% error budget: **${fmt(h.peakSuccessfulRequestsPerSecond)} req/s** at concurrency ${h.peakConcurrency}.\n- Latency at that load: **${fmt(h.peakP50Ms)} ms p50**, **${fmt(h.peakP95Ms)} ms p95**, **${fmt(h.peakP99Ms)} ms p99**.\n- Streaming TTFT: **${fmt(h.streamingP50TtftMs)} ms p50**, **${fmt(h.streamingP95TtftMs)} ms p95**.\n- Errors: **${h.totalLoadErrors}/${h.totalLoadRequests}**.\n- Telemetry delta: **${h.decisionDelta} decisions / ${h.outcomeDelta} outcomes**.\n- First observed health/router requests: ${fmt(h.firstObservedHealthMs)} / ${fmt(h.firstObservedRouterMs)} ms. These are not guaranteed cold starts.\n\n## Saturation curve\n\n| Concurrency | Edge health req/s | Router req/s | Health p50 ms | Router p50 ms | Router p95 ms | Router p99 ms | Median application path ms | Errors |\n| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows}\n${real}\n## Claim boundary\n\nThe \`benchmark/echo\` path includes ${report.methodology.includes.join(", ")}. It excludes ${report.methodology.excludes.join(", ")}. The median application-path estimate subtracts health p50 from router p50 at equal concurrency; it is an approximation, not Cloudflare CPU time. Report the target region, commit, sample count, concurrency, percentile, and error rate with any claim.\n`;
 }
 
 function renderConsole(report) {
   const h = report.headline;
-  return `\nRESULTS\n  Peak successful server path: ${fmt(h.peakSuccessfulRequestsPerSecond)} req/s @ concurrency ${h.peakConcurrency}\n  Latency: p50 ${fmt(h.peakP50Ms)} ms | p95 ${fmt(h.peakP95Ms)} ms | p99 ${fmt(h.peakP99Ms)} ms\n  Streaming TTFT: p50 ${fmt(h.streamingP50TtftMs)} ms | p95 ${fmt(h.streamingP95TtftMs)} ms\n  Errors: ${h.totalLoadErrors}/${h.totalLoadRequests}\n  Telemetry: +${h.decisionDelta} decisions / +${h.outcomeDelta} outcomes\n`;
+  const real = report.scenarios.realProvider;
+  const breakdown = real ? `\n  Real-provider latency breakdown (mean | p50 | p95 | p99)\n${consoleTiming("End-to-end", real.latencyMs)}\n${consoleTiming("LLM provider round trip", real.componentLatencyMs.provider)}\n${consoleTiming("Total - LLM provider", real.componentLatencyMs.totalMinusProvider)}\n${consoleTiming("BrokeRouter only", real.componentLatencyMs.router)}\n${consoleTiming("Client + Cloudflare", real.componentLatencyMs.clientCloudflare)}\n` : "";
+  const phases = real ? `\n  BrokeRouter phase breakdown (mean | p50 | p95 | p99)\n${routerPhases.map(([label, key]) => consoleTiming(label, real.componentLatencyMs.phases[key])).join("\n")}\n` : "";
+  return `\nRESULTS\n  Peak successful server path: ${fmt(h.peakSuccessfulRequestsPerSecond)} req/s @ concurrency ${h.peakConcurrency}\n  Latency: p50 ${fmt(h.peakP50Ms)} ms | p95 ${fmt(h.peakP95Ms)} ms | p99 ${fmt(h.peakP99Ms)} ms\n  Streaming TTFT: p50 ${fmt(h.streamingP50TtftMs)} ms | p95 ${fmt(h.streamingP95TtftMs)} ms\n  Errors: ${h.totalLoadErrors}/${h.totalLoadRequests}\n  Telemetry: +${h.decisionDelta} decisions / +${h.outcomeDelta} outcomes\n${breakdown}${phases}`;
+}
+
+function realProviderMarkdown(real) {
+  const rows = [
+    ["End-to-end", real.latencyMs],
+    ["LLM provider round trip", real.componentLatencyMs.provider],
+    ["Total minus LLM provider", real.componentLatencyMs.totalMinusProvider],
+    ["BrokeRouter only", real.componentLatencyMs.router],
+    ["Client plus Cloudflare", real.componentLatencyMs.clientCloudflare],
+  ].map(([name, metric]) => `| ${name} | ${fmt(metric.mean)} | ${fmt(metric.p50)} | ${fmt(metric.p95)} | ${fmt(metric.p99)} |`).join("\n");
+  const phaseRows = routerPhases.map(([label, key]) => {
+    const metric = real.componentLatencyMs.phases[key];
+    return `| ${label} | ${fmt(metric.mean)} | ${fmt(metric.p50)} | ${fmt(metric.p95)} | ${fmt(metric.p99)} |`;
+  }).join("\n");
+  return `\n## Real-provider sample\n\n- Requests: ${real.requests}; errors: ${real.errors}; semantic failures: ${real.semanticFailures}.\n- Providers: \`${JSON.stringify(real.providers)}\`; routes: \`${JSON.stringify(real.routes)}\`; fallbacks: ${real.fallbacks}.\n- Timing coverage: ${real.timingCoverage.measured}/${real.timingCoverage.successful} successful requests.\n\n| Component | Mean ms | p50 ms | p95 ms | p99 ms |\n| --- | ---: | ---: | ---: | ---: |\n${rows}\n\n### BrokeRouter phase breakdown\n\n| Phase | Mean ms | p50 ms | p95 ms | p99 ms |\n| --- | ---: | ---: | ---: | ---: |\n${phaseRows}\n\nProvider time includes the Cloudflare-to-provider network plus provider queueing and inference. Percentiles are computed from each component's per-request samples; they are not obtained by subtracting independently calculated percentiles.\n`;
+}
+
+function consoleTiming(name, metric) {
+  return `    ${name.padEnd(25)} ${fmt(metric.mean).padStart(8)} | ${fmt(metric.p50).padStart(8)} | ${fmt(metric.p95).padStart(8)} | ${fmt(metric.p99).padStart(8)} ms`;
 }
 
 function summarize(values) {
@@ -287,6 +385,17 @@ function summarize(values) {
 }
 function percentile(sorted, q) { const p = (sorted.length - 1) * q; const lo = Math.floor(p); const hi = Math.ceil(p); return sorted[lo] + (sorted[hi] - sorted[lo]) * (p - lo); }
 function counts(values) { return values.reduce((result, value) => ({ ...result, [value]: (result[value] ?? 0) + 1 }), {}); }
+function parseServerTiming(value) {
+  if (!value) return {};
+  const result = {};
+  for (const entry of value.split(",")) {
+    const name = entry.trim().split(";", 1)[0];
+    const match = /(?:^|;)\s*dur=([0-9]+(?:\.[0-9]+)?)/i.exec(entry);
+    if (name && match) result[name] = Number(match[1]);
+  }
+  return result;
+}
+function finite(value) { return typeof value === "number" && Number.isFinite(value); }
 function colo(ray) { return ray?.includes("-") ? ray.slice(ray.lastIndexOf("-") + 1) : undefined; }
 function optionalHeaders(record) { return Object.fromEntries(Object.entries(record).filter(([, value]) => typeof value === "string" && value.length)); }
 function required(name) { const value = process.env[name]; if (!value) { console.error(`${name} is required.`); process.exit(1); } return value; }

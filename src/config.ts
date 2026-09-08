@@ -1,5 +1,6 @@
 import type { AsyncJobQueue } from "./adapters/cloudflare/async-job-queue";
 import type { QuotaCoordinator } from "./adapters/cloudflare/quota-coordinator";
+import type { RoutingCoordinator } from "./adapters/cloudflare/routing-coordinator";
 import type { RoutingState } from "./adapters/cloudflare/routing-state";
 import type { WorkflowCoordinator } from "./adapters/cloudflare/workflow-coordinator";
 
@@ -7,10 +8,10 @@ import type { WorkflowCoordinator } from "./adapters/cloudflare/workflow-coordin
 export interface Env {
   NVIDIA_API_KEY?: string;
   NVIDIA_ENABLED?: string;
+  /** Enables the deterministic agentic benchmark provider for local integration tests. */
+  AGENT_TEST_PROVIDER_ENABLED?: string;
   /** Enables an explicit, non-automatic deterministic model for deployed server benchmarks. */
   BENCHMARK_PROVIDER_ENABLED?: string;
-  /** Enables the deterministic tool-calling provider used only by the Hermes integration test. */
-  AGENT_TEST_PROVIDER_ENABLED?: string;
   /** Preferred multi-caller registry. Store as an encrypted Worker secret. */
   CALLER_CREDENTIALS_JSON?: string;
   /** Transitional single-key authentication for local development only. */
@@ -24,6 +25,8 @@ export interface Env {
   NVIDIA_MAX_CONCURRENT?: string;
   NVIDIA_RESERVATION_TTL_MS?: string;
   MAX_INLINE_WAIT_MS?: string;
+  /** Maximum distinct providers tried for one automatic, non-streaming logical request. */
+  MAX_PROVIDER_ATTEMPTS?: string;
   ASYNC_JOB_MAX_ATTEMPTS?: string;
   ASYNC_JOB_RETENTION_MS?: string;
   ROUTING_EVENT_RETENTION_MS?: string;
@@ -32,12 +35,9 @@ export interface Env {
   ADAPTIVE_EXPLORATION_RATE?: string;
   ADAPTIVE_MIN_OBSERVATIONS?: string;
   ADDITIONAL_OPENAI_COMPATIBLE_PROVIDERS_JSON?: string;
-  /**
-   * Zero or more secret bindings named BROKEROUTER_PROVIDER_ACCOUNT_<ACCOUNT>.
-   * Each value is a self-contained JSON provider-account definition.
-   */
+  /** Secret JSON binding for a self-contained OpenAI-compatible provider account. */
   [binding: `BROKEROUTER_PROVIDER_ACCOUNT_${string}`]: unknown;
-  QUOTA_COORDINATOR: DurableObjectNamespace<QuotaCoordinator>;
+  ROUTING_COORDINATOR: DurableObjectNamespace<RoutingCoordinator>;
   CALLER_QUOTA_COORDINATOR: DurableObjectNamespace<QuotaCoordinator>;
   ASYNC_JOB_QUEUE: DurableObjectNamespace<AsyncJobQueue>;
   ROUTING_STATE: DurableObjectNamespace<RoutingState>;

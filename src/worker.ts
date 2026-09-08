@@ -2,19 +2,23 @@ import type { Env } from "./config";
 import { defaultPolicyControl, executeGeneration } from "./adapters/cloudflare/execution";
 import { registeredProviders } from "./adapters/cloudflare/provider-registry";
 import { QuotaCoordinator } from "./adapters/cloudflare/quota-coordinator";
+import { RoutingCoordinator } from "./adapters/cloudflare/routing-coordinator";
+import { routingCoordinator } from "./adapters/cloudflare/routing-coordinator-client";
 import { AsyncJobQueue } from "./adapters/cloudflare/async-job-queue";
 import { RoutingState } from "./adapters/cloudflare/routing-state";
+import type { PolicyControl } from "./adapters/cloudflare/routing-state";
 import { WorkflowCoordinator } from "./adapters/cloudflare/workflow-coordinator";
 import { authenticateCaller, requireScope } from "./core/auth";
 import { RouterError, type GenerationRequest, type RouterErrorCode } from "./core/types";
 import { VIRTUAL_MODELS } from "./core/virtual-models";
 import { parseWorkflowOutcome, parseWorkflowSpec } from "./core/workflow";
 
-export { QuotaCoordinator, AsyncJobQueue, RoutingState, WorkflowCoordinator };
+export { QuotaCoordinator, RoutingCoordinator, AsyncJobQueue, RoutingState, WorkflowCoordinator };
 export type { Env } from "./config";
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const requestStartedAt = performance.now();
     try {
       const url = new URL(request.url);
       if (url.pathname === "/health" && request.method === "GET") {
@@ -50,7 +54,7 @@ export default {
         const id = url.pathname.slice("/v1/workflows/".length, -"/outcome".length);
         const outcome = parseWorkflowOutcome(await parseJson(request));
         const workflow = await env.WORKFLOW_COORDINATOR.getByName(id).complete(id, caller.id, outcome);
-        ctx.waitUntil(env.ROUTING_STATE.getByName(caller.environment).recordWorkflowOutcome({
+        const learningOutcome = {
           workflowId: workflow.id,
           completedAt: Date.now(),
           callerId: caller.id,
@@ -64,7 +68,11 @@ export default {
           deadlineMet: outcome.deadlineMet ?? (workflow.deadlineAt === undefined || Date.now() <= workflow.deadlineAt),
           callsCompleted: workflow.callsCompleted,
           actualTokens: workflow.actualTokens,
-        }));
+        };
+        ctx.waitUntil(Promise.all([
+          env.ROUTING_STATE.getByName(caller.environment).recordWorkflowOutcome(learningOutcome),
+          routingCoordinator(env, caller.environment).recordWorkflowLearning(learningOutcome),
+        ]));
         return Response.json(workflow);
       }
       if (url.pathname.startsWith("/v1/workflows/") && request.method === "GET") {
@@ -83,7 +91,7 @@ export default {
       }
       if (url.pathname === "/v1/routing/policy" && request.method === "GET") {
         requireScope(caller, "stats:read");
-        return Response.json(await env.ROUTING_STATE.getByName(caller.environment).policyControl(
+        return Response.json(await routingCoordinator(env, caller.environment).policyControl(
           caller.environment, defaultPolicyControl(env),
         ));
       }
@@ -103,9 +111,12 @@ export default {
         if (typeof body.minObservations !== "number" || !Number.isInteger(body.minObservations) || body.minObservations < 0) {
           throw new RouterError("invalid_request", "minObservations must be a non-negative integer.", 400);
         }
-        return Response.json(await env.ROUTING_STATE.getByName(caller.environment).setPolicyControl(caller.environment, {
+        const control: PolicyControl = {
           mode: body.mode, explorationRate: body.explorationRate, minObservations: body.minObservations,
-        }));
+        };
+        const updated = await routingCoordinator(env, caller.environment).setPolicyControl(caller.environment, control);
+        ctx.waitUntil(env.ROUTING_STATE.getByName(caller.environment).setPolicyControl(caller.environment, control));
+        return Response.json(updated);
       }
       if (url.pathname === "/v1/jobs" && request.method === "POST") {
         requireScope(caller, "jobs:write");
@@ -136,6 +147,7 @@ export default {
         if (generation.route?.allowPaid) requireScope(caller, "providers:paid");
         return await executeGeneration(generation, env, (promise) => ctx.waitUntil(promise), {
           identity: { callerId: caller.id, environment: caller.environment, rateLimits: caller.rateLimits },
+          requestStartedAt,
         });
       }
       return openAiError("invalid_request", "Not found", 404);

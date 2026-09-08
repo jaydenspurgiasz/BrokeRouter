@@ -21,9 +21,10 @@ The optional Worker deployment uses a `workers.dev` endpoint protected by indepe
 - OpenAI-compatible `POST /v1/chat/completions`, with streaming forwarded without buffering.
 - `GET /v1/models` and `GET /health`.
 - NVIDIA adapter using `https://integrate.api.nvidia.com/v1/chat/completions`.
-- A SQLite-backed Durable Object that atomically enforces request windows, token windows, concurrent-call caps, a daily safety budget, and persisted cooldowns after upstream failures or 429s.
+- A SQLite-backed Routing Coordinator that performs provider safety gates, policy evaluation, and quota reservation atomically in one RPC while enforcing request/token windows, concurrency caps, daily budgets, and cooldowns.
 - A capability registry that refuses calls which would lose context, tools, streaming, or vision support.
-- A gate-first planner that inspects provider availability concurrently, then ranks only passing providers with a versioned deterministic best-fit policy.
+- A gate-first planner that ranks only admission-safe providers with a versioned deterministic best-fit policy; prompts and provider calls remain outside the coordinator.
+- A semantic completion gate that rejects empty or truncated public answers, records them as failed learning observations, and performs a bounded retry on a different active provider.
 - Durable workflow budgets, deadlines, concurrency leases, provider affinity, and terminal quality feedback.
 - Metadata-only online learning with hierarchical Bayesian provider statistics.
 - Baseline, shadow, and adaptive policy modes with bounded exploration, logged propensities, and immediate rollback.
@@ -72,7 +73,7 @@ NVIDIA thinking is available through the router's portable routing hint:
 { "route": { "reasoning": "on" } }
 ```
 
-It is off by default to protect free-tier output budgets. The router strips reasoning traces from returned responses even when reasoning is enabled; your agent receives the final answer and tool calls, not hidden chain-of-thought. Other provider-specific controls require an adapter-level option mapping before they are exposed as portable router fields.
+The router requests the cheapest non-thinking mode a provider exposes. NVIDIA GPT-OSS has no documented `off` value, so BrokeRouter maps the default to `reasoning_effort: "low"` and explicit opt-in to `"high"`. Reasoning traces are stripped from JSON and SSE responses; your agent receives only final answers, refusals, and tool calls. If hidden reasoning consumes the entire output budget, the semantic gate penalizes that attempt and retries another eligible provider.
 
 ## Local setup
 
@@ -132,6 +133,7 @@ const response = await env.LLM_GATEWAY.fetch("https://broke-router/v1/chat/compl
 | `NVIDIA_MAX_CONCURRENT` | Maximum in-flight calls using the shared NVIDIA credential. Defaults to `1` for conservative free-tier use. |
 | `NVIDIA_RESERVATION_TTL_MS` | Recovery period for an in-flight reservation abandoned by a crashed invocation. |
 | `MAX_INLINE_WAIT_MS` | Maximum time an interactive request may wait for the earliest slot before returning `503`. Defaults to 2 seconds. |
+| `MAX_PROVIDER_ATTEMPTS` | Maximum distinct provider credentials tried for one logical request after transport, upstream, empty-output, or truncation failures. Defaults to `2`. |
 | `ROUTING_POLICY_MODE` | Safe default policy: `baseline`, `shadow`, or `adaptive`. Durable runtime control overrides it. |
 | `ADAPTIVE_EXPLORATION_RATE` | Default epsilon, clamped to `0..0.25`. |
 | `ADAPTIVE_MIN_OBSERVATIONS` | Evidence required before adaptive routing can control traffic. |
@@ -144,6 +146,8 @@ const response = await env.LLM_GATEWAY.fetch("https://broke-router/v1/chat/compl
 ### Admission behavior
 
 The gateway uses persisted token buckets to calculate the earliest admission slot for configured request and token rates. For example, at one request per five seconds it can report a slot about two seconds away rather than waiting for a coarse window reset. It filters capable candidates first, then tries every eligible provider credential that can admit the request **now**. A provider that is in cooldown, above its request/token bucket, or at its concurrent-call cap is skipped. When none can admit, the gateway holds a bounded inline wait (the interactive queue) only when the earliest slot is within `MAX_INLINE_WAIT_MS`; otherwise it returns a `503` and `Retry-After`. This keeps interactive agent turns bounded rather than holding an HTTP connection for minutes.
+
+For non-streaming automatic routes, a provider 2xx is not enough: the public completion must contain visible content, a refusal, or a tool call and must not end with `finish_reason: "length"`. Failed attempts still consume and record their real provider tokens, but train the policy as failures. A successful retry reports `x-broke-router-route: fallback-selected`, `x-broke-router-attempts`, and `x-broke-router-fallback-from`. Streaming responses are sanitized and scored while they pass through; after response bytes begin, HTTP semantics prevent transparent replay to another provider.
 
 ## Additional providers
 
@@ -252,7 +256,7 @@ See `benchmarks/LIVE.md`. An optional bounded real-provider sample is enabled ex
 ## Current model aliases
 
 - `free/hermes` — virtual free-only agent tier; every candidate must provide at least 65,536 context, tool calling, streaming, and at least 4,096 output tokens.
-- `free/default` — text-oriented NVIDIA default.
+- `free/default` — automatic alias across every eligible active free provider account.
 - `nvidia/openai/gpt-oss-20b` — explicit version of the default.
 - `vision/default` — NVIDIA-hosted vision-capable fallback.
 

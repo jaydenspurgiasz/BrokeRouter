@@ -3,10 +3,10 @@
   "name": "broke-router",
   "workers_dev": true,
   "main": "src/worker.ts",
-  "compatibility_date": "2026-08-06",
+  "compatibility_date": "2026-08-08",
   "durable_objects": {
     "bindings": [
-      { "name": "QUOTA_COORDINATOR", "class_name": "QuotaCoordinator" }
+      { "name": "ROUTING_COORDINATOR", "class_name": "RoutingCoordinator" }
       ,{ "name": "CALLER_QUOTA_COORDINATOR", "class_name": "QuotaCoordinator" }
       ,{ "name": "ASYNC_JOB_QUEUE", "class_name": "AsyncJobQueue" }
       ,{ "name": "ROUTING_STATE", "class_name": "RoutingState" }
@@ -16,7 +16,8 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["QuotaCoordinator"] },
     { "tag": "v2", "new_sqlite_classes": ["AsyncJobQueue"] },
-    { "tag": "v3", "new_sqlite_classes": ["RoutingState", "WorkflowCoordinator"] }
+    { "tag": "v3", "new_sqlite_classes": ["RoutingState", "WorkflowCoordinator"] },
+    { "tag": "v4", "new_sqlite_classes": ["RoutingCoordinator"] }
   ],
   "vars": {
     "NVIDIA_ENABLED": "true",
@@ -30,6 +31,7 @@
     "NVIDIA_MAX_CONCURRENT": "1",
     "NVIDIA_RESERVATION_TTL_MS": "120000",
     "MAX_INLINE_WAIT_MS": "2000",
+    "MAX_PROVIDER_ATTEMPTS": "2",
     "ASYNC_JOB_MAX_ATTEMPTS": "5",
     "ASYNC_JOB_RETENTION_MS": "86400000",
     "ROUTING_EVENT_RETENTION_MS": "2592000000",
