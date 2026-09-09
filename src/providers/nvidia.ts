@@ -7,6 +7,7 @@ export async function invokeNvidia(
   model: ModelProfile,
   apiKey: string,
   signal?: AbortSignal,
+  endpoint = NVIDIA_CHAT_COMPLETIONS,
 ): Promise<Response> {
   const {
     route: _route,
@@ -25,7 +26,7 @@ export async function invokeNvidia(
           enable_thinking: request.route?.reasoning === "on",
         },
       };
-  return fetch(NVIDIA_CHAT_COMPLETIONS, {
+  return fetch(endpoint, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,

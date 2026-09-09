@@ -9,7 +9,14 @@ const envPath = resolve(process.env.BROKE_ROUTER_ENV_FILE ?? ".env");
 const source = parseDotEnv(await readFile(envPath, "utf8"));
 const routerKey = source.ROUTER_API_KEY;
 assert.ok(routerKey?.length >= 32, "ROUTER_API_KEY must contain at least 32 characters");
-const secrets = Object.values(source).filter((value) => value.length >= 20);
+// Account definitions are themselves secret values, but their nested API keys must also
+// be redacted and checked independently in case a diagnostic ever contains only a key.
+const secrets = [...new Set([
+  ...Object.values(source).filter((value) => value.length >= 20),
+  ...Object.entries(source)
+    .filter(([name]) => name.startsWith("BROKEROUTER_PROVIDER_ACCOUNT_"))
+    .flatMap(([, value]) => accountApiKey(value)),
+])];
 const suffix = randomBytes(5).toString("hex");
 const network = `brokerouter-acceptance-${suffix}`;
 const volume = `brokerouter-acceptance-data-${suffix}`;
@@ -86,7 +93,7 @@ async function runHermesClient(label) {
     const nvidia=list.find(x=>x.provider==='nvidia'&&x.credentialScope==='primary');
     const gemini=list.find(x=>x.provider==='gemini'&&x.credentialScope==='primary');
     if(!nvidia||!gemini)throw new Error('real provider accounts missing');
-    async function call(body){for(let i=0;;i++){const r=await fetch(base+'/v1/chat/completions',{method:'POST',headers:auth,body:JSON.stringify(body)});const t=await r.text();if(r.ok)return {r,b:JSON.parse(t)};if(i>=3||!(r.status===429||r.status>=500))throw new Error(r.status+': '+t.slice(0,300));await new Promise(ok=>setTimeout(ok,5500));}}
+    async function call(body){for(let i=0;;i++){const r=await fetch(base+'/v1/chat/completions',{method:'POST',headers:auth,body:JSON.stringify(body)});const t=await r.text();if(r.ok)return {r,b:JSON.parse(t)};const retry=Number(r.headers.get('retry-after'));if(i>=1||!(r.status===429||r.status>=500)||retry>15000)throw new Error(r.status+': '+t.slice(0,300));await new Promise(ok=>setTimeout(ok,Math.max(5500,Number.isFinite(retry)&&retry>0?retry*1000:0)));}}
     const n=await call({model:nvidia.id,messages:[{role:'user',content:'Reply with exactly ORACLE_NVIDIA_OK.'}],max_tokens:64});
     if(n.r.headers.get('x-broke-router-provider')!=='nvidia')throw new Error('NVIDIA route mismatch');
     const g=await call({model:gemini.id,messages:[{role:'user',content:'Reply with exactly ORACLE_GEMINI_OK.'}],max_tokens:256});
@@ -126,6 +133,12 @@ function parseDotEnv(text) {
     values[match[1]] = value;
   }
   return values;
+}
+function accountApiKey(raw) {
+  try {
+    const account = JSON.parse(raw);
+    return typeof account?.apiKey === "string" && account.apiKey.length >= 20 ? [account.apiKey] : [];
+  } catch { return []; }
 }
 function docker(args) { return run("docker", args); }
 async function quietly(args) { try { await docker(args); } catch { /* cleanup */ } }

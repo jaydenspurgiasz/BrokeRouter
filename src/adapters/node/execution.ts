@@ -10,12 +10,17 @@ export interface LocalIdentity {
   rateLimits: ProviderRateLimitSettings;
 }
 
+export interface LocalExecutionOptions {
+  upstreamTimeoutMs?: number;
+}
+
 export async function executeLocalGeneration(
   request: GenerationRequest,
   providers: RegisteredProvider[],
   state: SqliteState,
   identity: LocalIdentity,
   affinitySecret: string,
+  options: LocalExecutionOptions = {},
 ): Promise<Response> {
   let candidates = selectRoutes(request, providers.flatMap((provider) => provider.models));
   // Consume the tightest currently-capable free bucket first, preserving room in broader
@@ -62,17 +67,22 @@ export async function executeLocalGeneration(
     const controller = new AbortController();
     // A live reservation must never outlast the upstream request. This keeps a hung request
     // from being reclaimed as stale and violating the credential's concurrency ceiling.
-    const deadlineMs = Math.max(1_000, Math.min(90_000, provider.rateLimits.reservationTtlMs - 1_000));
+    const deadlineMs = Math.max(1_000, Math.min(
+      positive(options.upstreamTimeoutMs, 30_000),
+      provider.rateLimits.reservationTtlMs - 1_000,
+    ));
     const deadline: any = setTimeout(() => controller.abort(), deadlineMs);
     const clearDeadline = () => clearTimeout(deadline);
     let upstream: Response;
     try {
-      upstream = await provider.invoke(request, selection.model, controller.signal);
+      upstream = await invokeWithTransportRetry(provider, request, selection.model, controller.signal);
     } catch (error) {
       clearDeadline();
       const detail = error instanceof Error ? `${error.name}: ${error.message}` : "unknown transport error";
       console.error(`Provider invocation failed for ${provider.id}:${provider.credentialScope}: ${detail}`);
-      state.settle(providerScope, providerReservation.reservationId, { success: false, cooldown: true, settings: provider.rateLimits });
+      state.settle(providerScope, providerReservation.reservationId, {
+        success: false, cooldown: true, retryAfterMs: 5_000, settings: provider.rateLimits,
+      });
       lastStatus = 502;
       continue;
     }
@@ -80,10 +90,11 @@ export async function executeLocalGeneration(
     if (upstream.status === 429 || upstream.status >= 500) {
       clearDeadline();
       const delay = retryAfter(upstream);
+      const cooldownMs = upstream.status === 429 ? delay : (delay ?? 5_000);
       state.settle(providerScope, providerReservation.reservationId, {
-        success: false, cooldown: true, retryAfterMs: delay, settings: provider.rateLimits,
+        success: false, cooldown: true, retryAfterMs: cooldownMs, settings: provider.rateLimits,
       });
-      retryAfterMs = earliest(retryAfterMs, delay);
+      retryAfterMs = earliest(retryAfterMs, cooldownMs);
       lastStatus = upstream.status;
       await upstream.body?.cancel().catch(() => undefined);
       continue;
@@ -102,7 +113,12 @@ export async function executeLocalGeneration(
       if (success && affinityHash) state.setAffinity(identity.environment, identity.callerId, alias, affinityHash,
         provider.id, provider.credentialScope, selection.model.id);
     };
-    if (request.stream) return routed(streamWithFinalizer(upstream, finalize, clearDeadline), provider.id, selection.model.id);
+    if (request.stream) {
+      // Once headers arrive, the request timeout has served its purpose. Streaming instead
+      // uses an inactivity deadline that is refreshed for every upstream chunk.
+      clearDeadline();
+      return routed(streamWithFinalizer(upstream, finalize, clearDeadline, deadlineMs), provider.id, selection.model.id);
+    }
     const normalized = await sanitize(upstream);
     clearDeadline();
     if (normalized.valid) {
@@ -130,11 +146,30 @@ function scarcity(provider: RegisteredProvider | undefined): number {
 function earliest(left: number | undefined, right: number | undefined): number | undefined {
   if (right === undefined) return left; return left === undefined ? right : Math.min(left, right);
 }
+function positive(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+}
 function retryAfter(response: Response): number | undefined {
   const raw = response.headers.get("retry-after");
   if (!raw) return undefined;
   const seconds = Number(raw); if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
   const at = Date.parse(raw); return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
+}
+async function invokeWithTransportRetry(
+  provider: RegisteredProvider,
+  request: GenerationRequest,
+  model: Parameters<RegisteredProvider["invoke"]>[1],
+  signal: AbortSignal,
+): Promise<Response> {
+  try {
+    return await provider.invoke(request, model, signal);
+  } catch (firstError) {
+    // A fetch-level failure has no upstream response and consumes no confirmed capacity.
+    // Retry it once on the same explicitly selected credential before declaring it unavailable.
+    if (signal.aborted) throw firstError;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return provider.invoke(request, model, signal);
+  }
 }
 function routed(response: Response, provider: string, model: string): Response {
   const headers = new Headers(response.headers);
@@ -144,19 +179,46 @@ function routed(response: Response, provider: string, model: string): Response {
   headers.set("x-broke-router-route", "local-sqlite");
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
-function streamWithFinalizer(response: Response, finalize: (success: boolean, actualTokens?: number) => void, clearDeadline: () => void): Response {
+function streamWithFinalizer(
+  response: Response,
+  finalize: (success: boolean, actualTokens?: number) => void,
+  clearDeadline: () => void,
+  timeoutMs: number,
+): Response {
   if (!response.body) { clearDeadline(); finalize(false); return response; }
   const reader = response.body.getReader(); const decoder = new TextDecoder(); const encoder = new TextEncoder();
   let done = false; let pending = ""; let visible = false; let truncated = false; let actualTokens: number | undefined;
-  const finish = (success: boolean) => { if (!done) { done = true; clearDeadline(); finalize(success, actualTokens); } };
+  let streamDeadline: ReturnType<typeof setTimeout> | undefined;
+  let downstream: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const finish = (success: boolean) => {
+    if (!done) {
+      done = true;
+      if (streamDeadline) clearTimeout(streamDeadline);
+      clearDeadline();
+      finalize(success, actualTokens);
+    }
+  };
+  // Some upstreams resolve fetch headers but never finish their SSE body. Abort the reader
+  // as well as the fetch so a stuck stream cannot hold an agent turn or quota lease forever.
+  const armStreamDeadline = () => {
+    if (streamDeadline) clearTimeout(streamDeadline);
+    streamDeadline = setTimeout(() => {
+      finish(false);
+      void reader.cancel(new Error("Upstream stream inactivity deadline exceeded"));
+      downstream?.error(new Error("Upstream stream inactivity deadline exceeded"));
+    }, timeoutMs);
+  };
+  armStreamDeadline();
   const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
+      downstream = controller;
       try {
         const chunk = await reader.read();
         if (chunk.done) {
           const tail = sanitize(decoder.decode(), true); if (tail) controller.enqueue(encoder.encode(tail));
           finish(visible && !truncated); controller.close();
         } else {
+          armStreamDeadline();
           const output = sanitize(decoder.decode(chunk.value, { stream: true }), false);
           if (output) controller.enqueue(encoder.encode(output));
         }

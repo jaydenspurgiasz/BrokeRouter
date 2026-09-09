@@ -14,27 +14,11 @@ const gemini = parseAccount(sourceEnv[geminiName], geminiName, "gemini");
 const routerKey = sourceEnv.ROUTER_API_KEY;
 assert.ok(routerKey?.length >= 32, "ROUTER_API_KEY must contain at least 32 characters");
 const secretValues = [routerKey, nvidia.apiKey, gemini.apiKey];
-const rateOnly = process.argv.includes("--rate-only");
-
-const behaviorEnv = {
-  ...sourceEnv,
-  // Make NVIDIA the tighter safe bin for the two-call Hermes context workflow. This verifies
-  // best-fit selection deterministically without changing the user's persisted account limits.
-  [nvidiaName]: JSON.stringify(withRequestLimit(nvidia, 4, 60_000)),
-  [geminiName]: JSON.stringify(withRequestLimit(gemini, 100, 60_000)),
-};
-if (!rateOnly) await runLocalSuite("behavior", 8801, behaviorEnv, runBehaviorSuite);
-
-const rateEnv = {
-  ...sourceEnv,
-  [nvidiaName]: JSON.stringify(withRequestLimit(nvidia, 1, 60_000)),
-  [geminiName]: JSON.stringify(withRequestLimit(gemini, 10, 60_000)),
-};
-await runLocalSuite("rate-fallback", 8802, rateEnv, runRateFallbackSuite);
-
-console.log(rateOnly
-  ? "\nLive native rate-limit fallback check passed."
-  : "\nAll live Hermes checks passed using real NVIDIA and Gemini calls.");
+// Never change account limits upward for a real-token test: the provider's actual quota
+// is authoritative and the router must be tested against the limits it was configured to honor.
+const port = 20_000 + Math.floor(Math.random() * 20_000);
+await runLocalSuite("behavior", port, sourceEnv, runBehaviorSuite);
+console.log("\nAll bounded live Hermes checks passed using the configured NVIDIA and Gemini limits.");
 
 async function runBehaviorSuite(baseUrl) {
   const headers = authHeaders();
@@ -52,7 +36,9 @@ async function runBehaviorSuite(baseUrl) {
   await checkProvider(baseUrl, geminiModel.id, "gemini");
   await checkStreaming(baseUrl, geminiModel.id);
   await checkContextWorkflow(baseUrl);
-  await checkToolWorkflow(baseUrl, geminiModel.id);
+  // Keep this bounded suite within the configured Gemini 5 RPM allowance. The automatic
+  // Hermes context route consumes the tighter Gemini account; exercise tools on NVIDIA.
+  await checkToolWorkflow(baseUrl, nvidiaModel.id);
 }
 
 async function checkProvider(baseUrl, model, expectedProvider) {
@@ -71,6 +57,7 @@ async function checkStreaming(baseUrl, model) {
   for (let attempt = 0; ; attempt += 1) {
     const response = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: "POST", headers: authHeaders(),
+      signal: AbortSignal.timeout(75_000),
       body: JSON.stringify({
         model, stream: true, reasoning_effort: "low",
         messages: [{ role: "user", content: "Reply with exactly STREAM_OK." }], max_tokens: 512,
@@ -155,19 +142,6 @@ async function checkToolWorkflow(baseUrl, model) {
   pass("real agentic tool loop", `provider=${second.response.headers.get("x-broke-router-provider")}, calls=2`);
 }
 
-async function runRateFallbackSuite(baseUrl) {
-  const request = {
-    model: "free/hermes", messages: [{ role: "user", content: "Reply with exactly RATE_OK." }], max_tokens: 80,
-  };
-  const first = await completion(baseUrl, request, 0);
-  const second = await completion(baseUrl, request, 3);
-  assert.equal(first.response.headers.get("x-broke-router-provider"), "nvidia",
-    "tightest eligible request bucket should be consumed first");
-  assert.equal(second.response.headers.get("x-broke-router-provider"), "gemini",
-    "exhausted NVIDIA account should fall back to Gemini");
-  pass("credential-scoped predictive rate fallback", "nvidia -> gemini");
-}
-
 async function runLocalSuite(name, port, values, suite) {
   const runDir = await mkdtemp(join(tmpdir(), `brokerouter-live-${name}-`));
   const envPath = join(runDir, ".env.live");
@@ -209,7 +183,7 @@ async function runLocalSuite(name, port, values, suite) {
   if (failure) throw failure;
 }
 
-async function completion(baseUrl, body, retries = 3) {
+async function completion(baseUrl, body, retries = 0) {
   for (let attempt = 0; ; attempt += 1) {
     const response = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: "POST", headers: authHeaders(), body: JSON.stringify(body),
@@ -301,16 +275,6 @@ function parseAccount(raw, bindingName, expectedProvider) {
   assert.equal(account.provider, expectedProvider, `${bindingName} has the wrong provider`);
   assert.ok(account.apiKey?.length >= 20, `${bindingName} has no usable key`);
   return account;
-}
-
-function withRequestLimit(account, limit, windowMs) {
-  return {
-    ...account,
-    rateLimits: {
-      dailySafetyBudgetTokens: 0, cooldownMs: 5_000,
-      requests: { limit, windowMs }, maxConcurrent: 1, reservationTtlMs: 30_000,
-    },
-  };
 }
 
 function serializeDotEnv(values) {

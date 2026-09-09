@@ -33,3 +33,9 @@ networks:
   hermes-private:
     external: true
     name: ${BROKEROUTER_HERMES_NETWORK:-brokerouter-hermes-private}
+
+secrets:
+  # The host-side source is the ignored deployment .env. Docker mounts it read-only
+  # at /run/secrets/brokerouter.env; it is never copied into the image or environment.
+  brokerouter_env:
+    file: ${BROKEROUTER_ENV_SOURCE:-.env}

@@ -24,7 +24,12 @@ export function registeredProviders(env: Env): RegisteredProvider[] {
     env.ADDITIONAL_OPENAI_COMPATIBLE_PROVIDERS_JSON,
     env,
     nvidiaLimits,
-  ), ...configuredProviderAccounts(env, nvidiaLimits), ...diagnostics];
+  ), ...configuredProviderAccounts(env, nvidiaLimits, (account) => {
+    // Dynamic NVIDIA accounts must receive the same GPT-OSS/reasoning normalization as
+    // the legacy NVIDIA_API_KEY binding; generic OpenAI-compatible forwarding differs.
+    if (account.provider.toLowerCase() !== "nvidia") return undefined;
+    return (request, model, signal) => invokeNvidia(request, model, account.apiKey, signal, account.endpoint);
+  }), ...diagnostics];
   assertUniqueProviderAccounts(providers);
   return providers;
 }

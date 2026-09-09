@@ -38,7 +38,7 @@ export function providerForModel(
 
 export const PROVIDER_ACCOUNT_PREFIX = "BROKEROUTER_PROVIDER_ACCOUNT_";
 
-interface ProviderAccountConfig {
+export interface ProviderAccountConfig {
   provider: string;
   endpoint: string;
   apiKey: string;
@@ -47,6 +47,8 @@ interface ProviderAccountConfig {
   models: Array<Omit<ModelProfile, "provider" | "credentialScope">>;
   rateLimits?: Partial<ProviderRateLimitSettings>;
 }
+
+export type ProviderAccountInvokerFactory = (account: Readonly<ProviderAccountConfig>) => RegisteredProvider["invoke"] | undefined;
 
 /** Additional providers are runtime configuration: no provider secret is ever embedded in catalog JSON. */
 export function configuredOpenAiCompatibleProviders(
@@ -89,6 +91,7 @@ export function configuredOpenAiCompatibleProviders(
 export function configuredProviderAccounts(
   bindings: object,
   defaults: ProviderRateLimitSettings,
+  invokerFactory?: ProviderAccountInvokerFactory,
 ): RegisteredProvider[] {
   return Object.entries(bindings)
     .filter(([name]) => name.startsWith(PROVIDER_ACCOUNT_PREFIX))
@@ -125,7 +128,8 @@ export function configuredProviderAccounts(
         credentialScope,
         models,
         rateLimits,
-        invoke: (request, model, signal) => invokeOpenAiCompatible(value.endpoint, value.apiKey, request, model, signal),
+        invoke: invokerFactory?.(value)
+          ?? ((request, model, signal) => invokeOpenAiCompatible(value.endpoint, value.apiKey, request, model, signal)),
       }];
     });
 }

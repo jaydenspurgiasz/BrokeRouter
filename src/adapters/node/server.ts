@@ -39,8 +39,8 @@ const server = createServer(async (incoming: any, outgoing: any) => {
     outgoing.end();
   } catch (error) {
     const routed = error instanceof RouterError ? error : undefined;
-    if (!routed) console.error("Unhandled local router error", error);
     if (outgoing.headersSent) { outgoing.destroy(); return; }
+    if (!routed) console.error("Unhandled local router error", error);
     const status = routed?.status ?? 500;
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (routed?.retryAfterMs) headers["retry-after"] = String(Math.ceil(routed.retryAfterMs / 1_000));
@@ -73,7 +73,7 @@ async function handle(request: Request): Promise<Response> {
     if (generation.route?.allowPaid) requireScope(caller, "providers:paid");
     return executeLocalGeneration(generation, providers, state, {
       callerId: caller.id, environment: caller.environment, rateLimits: caller.rateLimits,
-    }, validatedAffinitySecret);
+    }, validatedAffinitySecret, { upstreamTimeoutMs: positive(env.BROKEROUTER_UPSTREAM_TIMEOUT_MS, 30_000) });
   }
   throw new RouterError("invalid_request", "Not found", 404);
 }

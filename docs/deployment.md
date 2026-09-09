@@ -18,6 +18,11 @@ docker compose -f compose.oracle.yml up -d --build
 docker compose -f compose.oracle.yml ps
 ```
 
+Compose reads `./.env` beside `compose.oracle.yml` by default and mounts it as the
+`brokerouter_env` secret. If your deployment secret lives elsewhere, set
+`BROKEROUTER_ENV_SOURCE` to its absolute path before running Compose; it is mounted read-only and
+is not added to the container environment.
+
 Attach Hermes to `brokerouter-hermes-private` and configure its OpenAI-compatible base URL as
 `http://brokerouter:8787/v1`, its caller token, and model `free/hermes`. There is intentionally no
 host port. The Compose secret mount keeps provider keys out of Docker environment inspection; the
