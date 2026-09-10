@@ -8,6 +8,7 @@ const server = createServer(async (request, response) => {
   const provider = request.headers.authorization === "Bearer local-a" ? "alpha" : "beta";
   if (body.stream) {
     response.writeHead(200, { "content-type": "text/event-stream" });
+    if (JSON.stringify(body.messages).includes("STALL_STREAM")) { response.flushHeaders(); return; }
     response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "STREAM_OK" } }] })}\n\n`);
     response.end("data: [DONE]\n\n"); return;
   }

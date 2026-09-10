@@ -18,6 +18,7 @@ const environment = {
   BROKEROUTER_DATABASE_PATH: join(directory, "router.sqlite"),
   BROKEROUTER_ENV_FILE: join(directory, "missing.env"),
   ROUTER_API_KEY: routerKey,
+  BROKEROUTER_UPSTREAM_TIMEOUT_MS: "1000",
   NVIDIA_ENABLED: "false",
   BROKEROUTER_PROVIDER_ACCOUNT_MOCK_ALPHA: JSON.stringify({ provider: "mock", credentialScope: "alpha",
     endpoint: `http://127.0.0.1:${upstreamPort}/v1/chat/completions`, apiKey: "local-a", models: [model("mock-alpha")],
@@ -54,13 +55,22 @@ try {
   }) });
   assert.equal(stream.status, 200); assert.match(await stream.text(), /STREAM_OK[\s\S]*\[DONE\]/);
 
+  await assert.rejects(fetch(base("/v1/chat/completions"), { method: "POST", headers: auth(), body: JSON.stringify({
+    model: "mock@beta/free/default", stream: true, messages: [{ role: "user", content: "STALL_STREAM" }], max_tokens: 32,
+  }) }));
+  await delay(100);
+  assert.equal(router.exitCode, null, "a stalled upstream stream must not terminate the router");
+  assert.equal((await fetch(base("/health"))).status, 200);
+  const afterStall = await completion({ model: "mock@beta/free/default", messages: [{ role: "user", content: "after stalled stream" }], max_tokens: 64 });
+  assert.equal(afterStall.body.choices[0].message.content, "OK_BETA", "the timed-out stream reservation must be released");
+
   await stop(router); router = undefined;
   router = child("dist/adapters/node/server.js", environment);
   await waitFor(base("/health"), router, true);
   const afterRestart = await completion({ model: "free/hermes", messages: [{ role: "user", content: "restart" }], max_tokens: 64 });
   assert.equal(afterRestart.headers.get("x-broke-router-model"), "mock@beta/free/default",
     "alpha quota must remain exhausted after restart");
-  console.log("PASS native server, SQLite restart persistence, multi-account fallback, affinity failover, context, and SSE");
+  console.log("PASS native server, SQLite restart persistence, multi-account fallback, affinity failover, context, and resilient SSE timeouts");
 } finally {
   if (router) await stop(router); await stop(upstream); await removeDirectory(directory);
 }

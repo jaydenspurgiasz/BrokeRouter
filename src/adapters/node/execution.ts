@@ -203,9 +203,12 @@ function streamWithFinalizer(
   const armStreamDeadline = () => {
     if (streamDeadline) clearTimeout(streamDeadline);
     streamDeadline = setTimeout(() => {
+      const timeoutError = new Error("Upstream stream inactivity deadline exceeded");
       finish(false);
-      void reader.cancel(new Error("Upstream stream inactivity deadline exceeded"));
-      downstream?.error(new Error("Upstream stream inactivity deadline exceeded"));
+      // Both cancellations can reject after a stream error. They are cleanup only and
+      // must never create an unhandled rejection that can terminate the router process.
+      void reader.cancel(timeoutError).catch(() => undefined);
+      try { downstream?.error(timeoutError); } catch { /* response already closed */ }
     }, timeoutMs);
   };
   armStreamDeadline();
@@ -225,7 +228,10 @@ function streamWithFinalizer(
       }
       catch (error) { finish(false); controller.error(error); }
     },
-    async cancel(reason) { await reader.cancel(reason); finish(false); },
+    async cancel(reason) {
+      finish(false);
+      await reader.cancel(reason).catch(() => undefined);
+    },
   });
   function sanitize(text: string, flush: boolean): string {
     pending += text; const lines = pending.split("\n"); pending = flush ? "" : (lines.pop() ?? "");

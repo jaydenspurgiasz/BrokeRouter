@@ -32,10 +32,13 @@ const server = createServer(async (incoming: any, outgoing: any) => {
     outgoing.writeHead(response.status, responseHeaders);
     if (!response.body) return outgoing.end();
     const reader = response.body.getReader();
-    const cancelOnDisconnect = () => { void reader.cancel(); };
+    const cancelOnDisconnect = () => { void reader.cancel().catch(() => undefined); };
     outgoing.once("close", cancelOnDisconnect);
-    while (true) { const chunk = await reader.read(); if (chunk.done) break; if (!outgoing.write(chunk.value)) await onceDrain(outgoing); }
-    outgoing.off("close", cancelOnDisconnect);
+    try {
+      while (true) { const chunk = await reader.read(); if (chunk.done) break; if (!outgoing.write(chunk.value)) await onceDrain(outgoing); }
+    } finally {
+      outgoing.off("close", cancelOnDisconnect);
+    }
     outgoing.end();
   } catch (error) {
     const routed = error instanceof RouterError ? error : undefined;
