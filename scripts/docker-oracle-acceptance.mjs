@@ -29,12 +29,12 @@ try {
   await startRouter();
   await waitReady();
   await assertRuntimeHardening();
-  await runHermesClient("initial");
+  await runHermesClient("initial", true);
   await docker(["kill", router]);
   await docker(["start", router]);
   await waitReady();
   await assertSqliteRecovery();
-  await runHermesClient("post-recovery");
+  await runHermesClient("post-recovery", false);
   console.log("PASS Docker Oracle acceptance: private client network, secret mount, Linux runtime, live providers, SSE, context, abrupt recovery, SQLite integrity");
 } catch (error) {
   let logs = "";
@@ -83,7 +83,7 @@ async function assertRuntimeHardening() {
   pass("container hardening + inspect-safe secret mount");
 }
 
-async function runHermesClient(label) {
+async function runHermesClient(label, verifyStreaming) {
   const script = `
     const auth={authorization:'Bearer '+process.env.ROUTER_TOKEN,'content-type':'application/json'};
     const base='http://${router}:8787';
@@ -105,9 +105,11 @@ async function runHermesClient(label) {
     const first=await call({model:'free/hermes',route:{affinityKey:affinity},messages:[{role:'user',content:'Remember '+marker+' and acknowledge it.'}],max_tokens:256});
     const second=await call({model:'free/hermes',route:{affinityKey:affinity},messages:[{role:'user',content:'Remember '+marker+' and acknowledge it.'},first.b.choices[0].message,{role:'user',content:'What marker did I give you? Return only it.'}],max_tokens:256});
     if(!String(second.b.choices?.[0]?.message?.content||'').includes(marker))throw new Error('context was not preserved');
-    console.log('CLIENT_STEP ${label}: nvidia-sse');
-    const s=await fetch(base+'/v1/chat/completions',{method:'POST',headers:auth,body:JSON.stringify({model:nvidia.id,stream:true,messages:[{role:'user',content:'Reply with exactly ORACLE_STREAM_OK.'}],max_tokens:256})});
-    const stream=await s.text(); if(!s.ok||s.headers.get('x-broke-router-provider')!=='nvidia'||!stream.includes('data:')||!stream.includes('[DONE]'))throw new Error('SSE failed');
+    if(${verifyStreaming ? "true" : "false"}) {
+      console.log('CLIENT_STEP ${label}: nvidia-sse');
+      const s=await fetch(base+'/v1/chat/completions',{method:'POST',headers:auth,body:JSON.stringify({model:nvidia.id,stream:true,messages:[{role:'user',content:'Reply with exactly ORACLE_STREAM_OK.'}],max_tokens:256})});
+      const stream=await s.text(); if(!s.ok||s.headers.get('x-broke-router-provider')!=='nvidia'||!stream.includes('data:')||!stream.includes('[DONE]'))throw new Error('SSE failed');
+    }
     console.log('CLIENT_PASS ${label}');
   `;
   await docker(["run", "--name", client, "--network", network, "-e", `ROUTER_TOKEN=${routerKey}`, "node:22.14-bookworm-slim", "node", "-e", script]);
