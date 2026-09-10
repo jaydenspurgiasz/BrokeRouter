@@ -94,14 +94,18 @@ async function runHermesClient(label) {
     const gemini=list.find(x=>x.provider==='gemini'&&x.credentialScope==='primary');
     if(!nvidia||!gemini)throw new Error('real provider accounts missing');
     async function call(body){for(let i=0;;i++){const r=await fetch(base+'/v1/chat/completions',{method:'POST',headers:auth,body:JSON.stringify(body)});const t=await r.text();if(r.ok)return {r,b:JSON.parse(t)};const retry=Number(r.headers.get('retry-after'));if(i>=1||!(r.status===429||r.status>=500)||retry>15000)throw new Error(r.status+': '+t.slice(0,300));await new Promise(ok=>setTimeout(ok,Math.max(5500,Number.isFinite(retry)&&retry>0?retry*1000:0)));}}
+    console.log('CLIENT_STEP ${label}: nvidia');
     const n=await call({model:nvidia.id,messages:[{role:'user',content:'Reply with exactly ORACLE_NVIDIA_OK.'}],max_tokens:64});
     if(n.r.headers.get('x-broke-router-provider')!=='nvidia')throw new Error('NVIDIA route mismatch');
+    console.log('CLIENT_STEP ${label}: gemini');
     const g=await call({model:gemini.id,messages:[{role:'user',content:'Reply with exactly ORACLE_GEMINI_OK.'}],max_tokens:256});
     if(g.r.headers.get('x-broke-router-provider')!=='gemini')throw new Error('Gemini route mismatch');
+    console.log('CLIENT_STEP ${label}: context');
     const marker='ORACLECTX'+Date.now(); const affinity='hermes-'+marker;
     const first=await call({model:'free/hermes',route:{affinityKey:affinity},messages:[{role:'user',content:'Remember '+marker+' and acknowledge it.'}],max_tokens:256});
     const second=await call({model:'free/hermes',route:{affinityKey:affinity},messages:[{role:'user',content:'Remember '+marker+' and acknowledge it.'},first.b.choices[0].message,{role:'user',content:'What marker did I give you? Return only it.'}],max_tokens:256});
     if(!String(second.b.choices?.[0]?.message?.content||'').includes(marker))throw new Error('context was not preserved');
+    console.log('CLIENT_STEP ${label}: gemini-sse');
     const s=await fetch(base+'/v1/chat/completions',{method:'POST',headers:auth,body:JSON.stringify({model:gemini.id,stream:true,messages:[{role:'user',content:'Reply with exactly ORACLE_STREAM_OK.'}],max_tokens:256})});
     const stream=await s.text(); if(!s.ok||!stream.includes('data:')||!stream.includes('[DONE]'))throw new Error('SSE failed');
     console.log('CLIENT_PASS ${label}');
